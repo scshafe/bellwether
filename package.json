@@ -1,0 +1,19 @@
+{
+  "name": "agent-trading-platform",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
+    "lint": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "test": "npm run build && node --test dist/*.test.js",
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
