@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 
-import { requireEnv } from "./config.js";
+import { readDatabaseUrlConfig } from "./placement.js";
 
-export function createPool(databaseUrl = requireEnv("DATABASE_URL")): Pool {
+export function createPool(databaseUrl = readDatabaseUrlConfig().databaseUrl): Pool {
   return new Pool({ connectionString: databaseUrl });
 }

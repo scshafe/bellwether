@@ -4,10 +4,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool } from "pg";
 
 import { createPool } from "./db.js";
+import { createAgentRuntime } from "./placement.js";
 
 const WORKER_LOCK_ID = 420_001;
-const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 5_000);
-const readyFile = process.env.WORKER_READY_FILE ?? "/tmp/worker-ready";
+const workerPlacement = createAgentRuntime().describeWorkerPlacement();
 
 type ClaimedJob = {
   id: string;
@@ -49,7 +49,7 @@ async function runWorker(): Promise<void> {
 
   try {
     await pool.query("SELECT 1");
-    await writeFile(readyFile, "ready\n");
+    await writeFile(workerPlacement.readyFile, "ready\n");
 
     while (shouldRun) {
       const lock = await pool.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1) AS locked", [WORKER_LOCK_ID]);
@@ -66,10 +66,10 @@ async function runWorker(): Promise<void> {
         }
       }
 
-      await delay(pollIntervalMs);
+      await delay(workerPlacement.pollIntervalMs);
     }
   } finally {
-    await rm(readyFile, { force: true });
+    await rm(workerPlacement.readyFile, { force: true });
     await pool.end();
   }
 }

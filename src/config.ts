@@ -1,5 +1,9 @@
 export function requireEnv(name: string): string {
-  const value = process.env[name];
+  return requireConfigValue(process.env, name);
+}
+
+export function requireConfigValue(config: NodeJS.ProcessEnv, name: string): string {
+  const value = config[name];
 
   if (!value) {
     throw new Error(`${name} is required`);
