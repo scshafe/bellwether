@@ -1,9 +1,13 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-export function handleRequest(request: IncomingMessage, response: ServerResponse): void {
+type ServerOptions = {
+  databaseUrl?: string;
+};
+
+export function handleRequest(request: IncomingMessage, response: ServerResponse, options: ServerOptions = {}): void {
   if (request.method === "GET" && request.url === "/healthz") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true }));
+    response.end(JSON.stringify(options.databaseUrl ? { ok: true, databaseConfigured: true } : { ok: true }));
     return;
   }
 
@@ -11,6 +15,6 @@ export function handleRequest(request: IncomingMessage, response: ServerResponse
   response.end(JSON.stringify({ error: "not_found" }));
 }
 
-export function createServer(): Server {
-  return createHttpServer(handleRequest);
+export function createServer(options: ServerOptions = {}): Server {
+  return createHttpServer((request, response) => handleRequest(request, response, options));
 }
