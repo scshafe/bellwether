@@ -15,6 +15,7 @@ import { getOrderGuardRailViolations } from "./order-rails.js";
 import type { CandidateAction, PortfolioSnapshot, QuantPlaybook } from "./quant-playbook.js";
 import type { ReasoningModel } from "./llm.js";
 import type { StrategyRecord } from "./strategy.js";
+import { strategyPromptShape } from "./strategy-chat.js";
 
 export type AgentProposedOrder = BrokerOrderRequest & {
   symbol: string;
@@ -393,16 +394,6 @@ function normalizeDecisionLogLimit(limit: number): number {
 
 function cloneDecisionLogEntry(entry: AgentDecisionLogEntry): AgentDecisionLogEntry {
   return cloneJson(entry);
-}
-
-function strategyPromptShape(strategy: StrategyRecord): Record<string, unknown> {
-  return {
-    id: strategy.id,
-    name: strategy.name,
-    description: strategy.description,
-    status: strategy.status,
-    parameters: strategy.parameters
-  };
 }
 
 type StrategyAnalystParsedResponse = {

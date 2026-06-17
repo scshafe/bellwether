@@ -210,7 +210,7 @@ function candidateIdeasValue(value: unknown, currentParameters: QuantPlaybookPar
   return value.map((candidate) => candidateIdeaValue(candidate, currentParameters)).filter(isDefined).slice(0, 5);
 }
 
-function candidateIdeaValue(value: unknown, currentParameters: QuantPlaybookParameters): StrategyChatCandidateIdea | null {
+export function candidateIdeaValue(value: unknown, currentParameters: QuantPlaybookParameters): StrategyChatCandidateIdea | null {
   const record = optionalObjectValue(value);
 
   if (!record) {
@@ -230,7 +230,7 @@ function candidateIdeaValue(value: unknown, currentParameters: QuantPlaybookPara
   return { name, mandate, suggestedParameters };
 }
 
-function parameterDeltaValue(value: unknown): Partial<QuantPlaybookParameters> | null {
+export function parameterDeltaValue(value: unknown): Partial<QuantPlaybookParameters> | null {
   const record = optionalObjectValue(value);
 
   if (!record) {
@@ -313,7 +313,7 @@ function inferChatMode(message: string): StrategyChatMode {
   return /brainstorm|idea|candidate|new strategy/iu.test(message) ? "brainstorm" : "formalize";
 }
 
-function strategyPromptShape(strategy: StrategyRecord): Record<string, unknown> {
+export function strategyPromptShape(strategy: StrategyRecord): Record<string, unknown> {
   return {
     id: strategy.id,
     name: strategy.name,
@@ -376,7 +376,7 @@ type StrategyChatMessageRow = {
   created_at: Date | string;
 };
 
-const quantPlaybookParameterKeys = [
+export const quantPlaybookParameterKeys = [
   "minPrice",
   "minAverageDollarVolume",
   "signalLookbackBars",
