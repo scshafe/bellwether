@@ -2,6 +2,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import authReducer from "./store/authSlice";
 import decisionsReducer from "./store/decisionsSlice";
 import positionsReducer from "./store/positionsSlice";
+import proposalsReducer from "./store/proposalsSlice";
 import rosterReducer from "./store/rosterSlice";
 import runtimeReducer from "./store/runtimeSlice";
 import strategiesReducer from "./store/strategiesSlice";
@@ -13,6 +14,7 @@ export const store = configureStore({
     auth: authReducer,
     decisions: decisionsReducer,
     positions: positionsReducer,
+    proposals: proposalsReducer,
     roster: rosterReducer,
     runtime: runtimeReducer,
     strategies: strategiesReducer,

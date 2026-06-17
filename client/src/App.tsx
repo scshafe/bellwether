@@ -5,6 +5,7 @@ import { createSession, setPassword, setUsername, signOut } from "./store/authSl
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
+import { acceptProposal, dismissProposal, fetchPortalProposals, proposalsSelectors, type StrategyProposalRecord } from "./store/proposalsSlice";
 import {
   createSource,
   deleteSource,
@@ -52,6 +53,7 @@ import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
   { id: "positions", label: "Positions + P&L", status: "live" },
   { id: "decisions", label: "Decision Log", status: "live" },
+  { id: "proposals", label: "Proposals", status: "P8e2" },
   { id: "roster", label: "Analyst Roster", status: "P7c" },
   { id: "strategies", label: "Strategy Workbench", status: "P6d" },
   { id: "control", label: "Agent Control", status: "P4d" }
@@ -62,6 +64,7 @@ export function App(): ReactElement {
   const auth = useAppSelector((state) => state.auth);
   const activeTab = useAppSelector((state) => state.workspace.activeTab);
   const canManageRuntime = auth.user ? isRuntimeManager(auth.user.role) : false;
+  const canManageProposals = canManageRuntime;
   const visibleTabs = canManageRuntime ? tabs : tabs.filter((tab) => tab.id !== "control");
 
   const submitSession = (event: FormEvent<HTMLFormElement>) => {
@@ -71,6 +74,7 @@ export function App(): ReactElement {
       .then(() => {
         void dispatch(fetchPortalPositions());
         void dispatch(fetchPortalDecisions());
+        void dispatch(fetchPortalProposals());
         void dispatch(fetchRoster());
         void dispatch(fetchRuntimeStatus());
         void dispatch(fetchPortalStrategies());
@@ -131,6 +135,7 @@ export function App(): ReactElement {
           </nav>
 
           {activeTab === "decisions" ? <DecisionsWorkspace /> : null}
+          {activeTab === "proposals" ? <ProposalsWorkspace canManageProposals={canManageProposals} /> : null}
           {activeTab === "roster" ? <RosterWorkspace canManageRoster={canManageRuntime} /> : null}
           {activeTab === "strategies" ? <StrategiesWorkspace canManageStrategies={canManageRuntime} /> : null}
           {activeTab === "control" && canManageRuntime ? <ControlWorkspace /> : null}
@@ -191,6 +196,117 @@ function DecisionList({ decisions }: { decisions: PortalDecision[] }): ReactElem
         <DecisionCard key={decision.id} decision={decision} />
       ))}
     </div>
+  );
+}
+
+function ProposalsWorkspace({ canManageProposals }: { canManageProposals: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const proposals = useAppSelector(proposalsSelectors.selectAll);
+  const status = useAppSelector((state) => state.proposals.status);
+  const mutationStatus = useAppSelector((state) => state.proposals.mutationStatus);
+  const error = useAppSelector((state) => state.proposals.error);
+  const refreshedAt = useAppSelector((state) => state.proposals.refreshedAt);
+
+  return (
+    <section className="panel strategies-workbench">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">GET /portal/proposals</p>
+          <h2>Proposals</h2>
+        </div>
+        <button type="button" className="ghost" onClick={() => dispatch(fetchPortalProposals())} disabled={status === "loading"}>
+          {status === "loading" ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
+
+      <p className="muted">PROPOSED advisory candidates raised by mode-c monitoring. These are future candidates, separate from the historical Decision Log.</p>
+      {error ? <p className="error">{error}</p> : null}
+      {refreshedAt ? <p className="muted">Proposal inbox refreshed {formatDateTime(refreshedAt)}</p> : null}
+      {!canManageProposals ? <p className="muted">Viewer session: proposals are read-only.</p> : null}
+
+      {proposals.length === 0 ? (
+        <ProposalEmptyState status={status} />
+      ) : (
+        <div className="strategy-grid proposal-grid">
+          {proposals.map((proposal) => (
+            <ProposalCard
+              key={proposal.id}
+              proposal={proposal}
+              canManageProposals={canManageProposals}
+              busy={mutationStatus === "loading"}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProposalEmptyState({ status }: { status: "idle" | "loading" | "succeeded" | "failed" }): ReactElement {
+  if (status === "loading") {
+    return <p className="empty">Loading proposed strategy candidates...</p>;
+  }
+
+  return <p className="empty">No pending proposals returned. Use Refresh after a paced cycle raises a new advisory candidate.</p>;
+}
+
+function ProposalCard({ proposal, canManageProposals, busy }: { proposal: StrategyProposalRecord; canManageProposals: boolean; busy: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const candidate = proposal.suggestedCandidate;
+
+  const accept = () => {
+    if (canManageProposals) {
+      void dispatch(acceptProposal(proposal.id))
+        .unwrap()
+        .then(() => {
+          void dispatch(fetchPortalStrategies());
+        });
+    }
+  };
+
+  const dismiss = () => {
+    if (canManageProposals) {
+      void dispatch(dismissProposal(proposal.id));
+    }
+  };
+
+  return (
+    <article className="decision-card strategy-card proposal-card">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">PROPOSED Candidate</p>
+          <h3>{candidate.name}</h3>
+        </div>
+        <div className="id-stack">
+          <span className={`status-badge status-${proposal.status}`}>{proposal.status}</span>
+          <code>{proposal.id}</code>
+        </div>
+      </header>
+
+      <p>{candidate.mandate}</p>
+      <div className="decision-meta">
+        <Meta label="Created" value={formatDateTime(proposal.createdAt)} />
+        <Meta label="Status" value={proposal.status} />
+        <Meta label="Source Strategy" value={proposal.strategyId ?? "none"} />
+      </div>
+
+      <ParameterSummary parameters={candidate.suggestedParameters} />
+
+      <GlassBox title="Quant Rationale" eyebrow="advisory proposal">
+        <p>{proposal.quantRationale}</p>
+      </GlassBox>
+
+      <QualitativeSlot evidence={proposal.qualitativeEvidence} />
+
+      {canManageProposals ? (
+        <div className="control-actions strategy-actions">
+          <button type="button" onClick={accept} disabled={busy}>Accept</button>
+          <button type="button" className="danger" onClick={dismiss} disabled={busy}>Dismiss</button>
+        </div>
+      ) : (
+        <p className="muted">Viewer session: proposals are read-only.</p>
+      )}
+    </article>
   );
 }
 
