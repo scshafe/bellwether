@@ -1,4 +1,4 @@
-import { requireConfigValue } from "./config.js";
+import { requireConfigValue, requireEnv } from "./config.js";
 
 export type ServerEndpointsConfig = {
   host: string;
@@ -102,7 +102,9 @@ export function readServerEndpointsConfig(config: NodeJS.ProcessEnv = process.en
 }
 
 export function readDatabaseUrlConfig(config: NodeJS.ProcessEnv = process.env): DatabaseUrlConfig {
-  return { databaseUrl: requireConfigValue(config, "DATABASE_URL") };
+  return {
+    databaseUrl: config === process.env ? requireEnv("DATABASE_URL") : requireConfigValue(config, "DATABASE_URL")
+  };
 }
 
 export function readWorkerPlacement(config: NodeJS.ProcessEnv = process.env): WorkerPlacement {
