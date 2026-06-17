@@ -271,6 +271,149 @@ tr:last-child td {
   min-height: 18rem;
 }
 
+.decision-empty {
+  border: 1px dashed rgba(148, 163, 184, 0.34);
+  border-radius: 0.9rem;
+  padding: 1.1rem;
+  background: rgba(2, 6, 23, 0.34);
+}
+
+.decision-empty h3,
+.decision-card h3,
+.glass-box h4,
+.qualitative-slot h4 {
+  margin: 0;
+}
+
+.decision-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.decision-card {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 1rem;
+  background: rgba(2, 6, 23, 0.48);
+  padding: 0.9rem;
+}
+
+.decision-card-header,
+.decision-meta,
+.glass-grid,
+.qualitative-slot {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.decision-card-header {
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  padding-bottom: 0.75rem;
+}
+
+.id-stack {
+  display: grid;
+  justify-items: end;
+  gap: 0.25rem;
+  color: #94a3b8;
+}
+
+.decision-meta {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0.75rem 0;
+}
+
+.decision-meta div,
+.glass-box,
+.qualitative-slot {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.85rem;
+  background: rgba(15, 23, 42, 0.58);
+  padding: 0.72rem;
+}
+
+.decision-meta span {
+  display: block;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.glass-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.glass-box p {
+  color: #cbd5e1;
+}
+
+.kv-block,
+.order-summary {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.kv-block strong,
+.order-summary strong {
+  color: #e2e8f0;
+}
+
+.kv-block dl {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+.kv-block dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  padding-bottom: 0.25rem;
+}
+
+.kv-block dt {
+  color: #94a3b8;
+}
+
+.kv-block dd {
+  margin: 0;
+  color: #f8fafc;
+}
+
+.violations {
+  margin: 0.5rem 0 0;
+  padding-left: 1.15rem;
+  color: #fecaca;
+}
+
+.rejection {
+  color: #fecaca;
+}
+
+.qualitative-slot {
+  grid-template-columns: 16rem 1fr;
+  align-items: start;
+  margin-top: 0.8rem;
+}
+
+.qualitative-grid {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.qualitative-grid a {
+  color: #67e8f9;
+}
+
+.qualitative-grid blockquote {
+  margin: 0;
+  color: #e2e8f0;
+}
+
 @media (max-width: 920px) {
   .masthead,
   .login-panel,
@@ -290,6 +433,17 @@ tr:last-child td {
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .decision-card-header,
+  .decision-meta,
+  .glass-grid,
+  .qualitative-slot {
+    grid-template-columns: 1fr;
+  }
+
+  .id-stack {
+    justify-items: start;
   }
 }
 

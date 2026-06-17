@@ -1,13 +1,14 @@
-import type { FormEvent, ReactElement } from "react";
+import type { FormEvent, ReactElement, ReactNode } from "react";
 
 import { createSession, setPassword, setUsername, signOut } from "./store/authSlice";
+import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
 import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
   { id: "positions", label: "Positions + P&L", status: "live" },
-  { id: "decisions", label: "Decision Log", status: "P4c" },
+  { id: "decisions", label: "Decision Log", status: "live" },
   { id: "control", label: "Agent Control", status: "P4d" }
 ];
 
@@ -20,7 +21,10 @@ export function App(): ReactElement {
     event.preventDefault();
     void dispatch(createSession())
       .unwrap()
-      .then(() => dispatch(fetchPortalPositions()));
+      .then(() => {
+        void dispatch(fetchPortalPositions());
+        void dispatch(fetchPortalDecisions());
+      });
   };
 
   return (
@@ -65,10 +69,220 @@ export function App(): ReactElement {
             ))}
           </nav>
 
-          {activeTab === "positions" ? <PositionsWorkspace /> : <DeferredWorkspace tab={activeTab} />}
+          {activeTab === "positions" ? <PositionsWorkspace /> : null}
+          {activeTab === "decisions" ? <DecisionsWorkspace /> : null}
+          {activeTab === "control" ? <DeferredWorkspace /> : null}
         </section>
       )}
     </main>
+  );
+}
+
+function DecisionsWorkspace(): ReactElement {
+  const dispatch = useAppDispatch();
+  const status = useAppSelector((state) => state.decisions.status);
+  const error = useAppSelector((state) => state.decisions.error);
+  const refreshedAt = useAppSelector((state) => state.decisions.refreshedAt);
+  const decisions = useAppSelector(decisionsSelectors.selectAll);
+
+  return (
+    <section className="panel">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">GET /portal/decisions</p>
+          <h2>Glass-Box Decision Log</h2>
+        </div>
+        <button type="button" onClick={() => dispatch(fetchPortalDecisions())} disabled={status === "loading"}>
+          {status === "loading" ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
+
+      {error ? <p className="error">{error}</p> : null}
+      {refreshedAt ? <p className="muted">Last refresh {new Date(refreshedAt).toLocaleString()}</p> : null}
+
+      {decisions.length === 0 ? <DecisionEmptyState status={status} /> : <DecisionList decisions={decisions} />}
+    </section>
+  );
+}
+
+function DecisionEmptyState({ status }: { status: "idle" | "loading" | "succeeded" | "failed" }): ReactElement {
+  if (status === "loading") {
+    return <p className="empty">Loading the decision log...</p>;
+  }
+
+  return (
+    <section className="empty decision-empty">
+      <p className="eyebrow">No Decisions Yet</p>
+      <h3>The glass-box log is empty.</h3>
+      <p>
+        No live cycle writes decisions until P4d starts the agent runtime. Refresh will show persisted entries as soon as the backend returns them.
+      </p>
+    </section>
+  );
+}
+
+function DecisionList({ decisions }: { decisions: PortalDecision[] }): ReactElement {
+  return (
+    <div className="decision-list">
+      {decisions.map((decision) => (
+        <DecisionCard key={decision.id} decision={decision} />
+      ))}
+    </div>
+  );
+}
+
+function DecisionCard({ decision }: { decision: PortalDecision }): ReactElement {
+  return (
+    <article className="decision-card">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">{decision.quantSignal.symbol} Decision</p>
+          <h3>{decision.execution.decision}</h3>
+        </div>
+        <div className="id-stack">
+          <code>{decision.id}</code>
+          <span>{formatDateTime(decision.createdAt)}</span>
+        </div>
+      </header>
+
+      <div className="decision-meta">
+        <Meta label="Cycle" value={decision.cycleId} />
+        <Meta label="Strategy" value={decision.strategyId} />
+        <Meta label="Signal As Of" value={formatDateTime(decision.quantSignal.asOf)} />
+      </div>
+
+      <div className="glass-grid">
+        <GlassBox title="Quant Signal" eyebrow="score / signals / sizing">
+          <Metric label="Score" value={formatNumber(decision.quantSignal.score)} raw={String(decision.quantSignal.score)} />
+          <KeyValueList title="Signals" values={decision.quantSignal.signals} />
+          <KeyValueList title="Sizing" values={decision.quantSignal.sizing} />
+        </GlassBox>
+
+        <GlassBox title="Analyst Thesis" eyebrow="strategy analyst">
+          <p>{decision.strategyAnalyst.thesis}</p>
+          <OrderSummary order={decision.strategyAnalyst.proposedOrder} title="Proposed Order" />
+        </GlassBox>
+
+        <GlassBox title="Risk Verdict" eyebrow={decision.risk.approved ? "approved" : "rejected"} tone={decision.risk.approved ? "gain" : "loss"}>
+          <p>{decision.risk.rationale}</p>
+          <DeterministicViolations violations={decision.risk.deterministicViolations} />
+        </GlassBox>
+
+        <GlassBox title="Execution" eyebrow={decision.execution.decision}>
+          <p>{decision.execution.rationale}</p>
+          {decision.execution.order ? <BrokerOrderSummary order={decision.execution.order} /> : null}
+          {decision.execution.brokerRejection ? <p className="rejection">Broker rejection: {decision.execution.brokerRejection}</p> : null}
+          {!decision.execution.order && !decision.execution.brokerRejection ? <p className="muted">No broker order was returned for this decision.</p> : null}
+        </GlassBox>
+      </div>
+
+      <QualitativeSlot evidence={decision.qualitativeEvidence} />
+    </article>
+  );
+}
+
+function GlassBox({ title, eyebrow, tone, children }: { title: string; eyebrow: string; tone?: "gain" | "loss"; children: ReactNode }): ReactElement {
+  return (
+    <section className={tone ? `glass-box ${tone}` : "glass-box"}>
+      <p className="eyebrow">{eyebrow}</p>
+      <h4>{title}</h4>
+      {children}
+    </section>
+  );
+}
+
+function Meta({ label, value }: { label: string; value: string }): ReactElement {
+  return (
+    <div>
+      <span>{label}</span>
+      <code>{value}</code>
+    </div>
+  );
+}
+
+function KeyValueList({ title, values }: { title: string; values: Record<string, string | number | boolean | null> }): ReactElement {
+  const entries = Object.entries(values).filter(([, value]) => value !== null && value !== undefined);
+
+  if (entries.length === 0) {
+    return <p className="muted">No {title.toLowerCase()} returned.</p>;
+  }
+
+  return (
+    <div className="kv-block">
+      <strong>{title}</strong>
+      <dl>
+        {entries.map(([key, value]) => (
+          <div key={key}>
+            <dt>{splitCamel(key)}</dt>
+            <dd>{typeof value === "number" ? formatNumber(value) : String(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+function OrderSummary({ order, title }: { order: PortalProposedOrder; title: string }): ReactElement {
+  return (
+    <div className="order-summary">
+      <strong>{title}</strong>
+      <code>{order.symbol}</code>
+      <span>{order.side} {order.qty} @ {formatMoney(String(order.limitPrice))}</span>
+      <span>Notional {formatMoney(String(order.estimatedNotional))}</span>
+    </div>
+  );
+}
+
+function BrokerOrderSummary({ order }: { order: PortalBrokerOrder }): ReactElement {
+  return (
+    <div className="order-summary">
+      <strong>Broker Order</strong>
+      <code>{order.id}</code>
+      {order.clientOrderId ? <code>{order.clientOrderId}</code> : null}
+      <span>{order.status}: {order.side} {order.qty} {order.symbol} {order.type}</span>
+    </div>
+  );
+}
+
+function DeterministicViolations({ violations }: { violations: string[] }): ReactElement {
+  if (violations.length === 0) {
+    return <p className="muted">No deterministic violations.</p>;
+  }
+
+  return (
+    <ul className="violations">
+      {violations.map((violation) => (
+        <li key={violation}>{violation}</li>
+      ))}
+    </ul>
+  );
+}
+
+function QualitativeSlot({ evidence }: { evidence?: PortalQualitativeEvidence }): ReactElement {
+  const hasEvidence = Boolean(evidence && (evidence.links.length > 0 || evidence.quotes.length > 0 || evidence.signals.length > 0));
+
+  return (
+    <section className="qualitative-slot">
+      <div>
+        <p className="eyebrow">P5 Content-Policy Slot</p>
+        <h4>Qualitative Sources</h4>
+      </div>
+      {!hasEvidence ? (
+        <p className="muted">No links, short attributed quotes, or agent-derived qualitative signals were returned for this decision.</p>
+      ) : (
+        <div className="qualitative-grid">
+          {evidence?.links.map((link) => (
+            <a key={link.href} href={link.href} target="_blank" rel="noreferrer">{link.title}{link.source ? ` (${link.source})` : ""}</a>
+          ))}
+          {evidence?.quotes.map((quote) => (
+            <blockquote key={`${quote.source}:${quote.quote}`}>"{quote.quote}" <cite>{quote.source}</cite></blockquote>
+          ))}
+          {evidence?.signals.map((signal) => (
+            <span key={`${signal.label}:${signal.value}`}>{signal.label}: {signal.value}{signal.source ? ` (${signal.source})` : ""}</span>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -191,13 +405,11 @@ function PositionsTable({ positions }: { positions: PortalPosition[] }): ReactEl
   );
 }
 
-function DeferredWorkspace({ tab }: { tab: Exclude<WorkspaceTab, "positions"> }): ReactElement {
-  const label = tab === "decisions" ? "P4c decision-log view" : "P4d start/stop control";
-
+function DeferredWorkspace(): ReactElement {
   return (
     <section className="panel placeholder-panel">
       <p className="eyebrow">Not Rendered Until Selected</p>
-      <h2>{label}</h2>
+      <h2>P4d start/stop control</h2>
       <p className="muted">This tab is a structural slot for the next Portal-MVP slice. No hidden subtree is mounted for inactive workspaces.</p>
     </section>
   );
@@ -211,6 +423,24 @@ function formatMoney(raw: string): string {
   }
 
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+}
+
+function formatNumber(raw: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(raw);
+}
+
+function formatDateTime(raw: string): string {
+  const date = new Date(raw);
+
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+
+  return date.toLocaleString();
+}
+
+function splitCamel(raw: string): string {
+  return raw.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
 }
 
 function formatPercent(raw: string | undefined): string {
