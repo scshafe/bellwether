@@ -30,5 +30,14 @@ VALUES
     'https://example.invalid/research/atom.xml',
     false,
     4
+  ),
+  (
+    '77777777-7777-4777-8777-777777777777',
+    'alpaca-news',
+    'Alpaca News',
+    'programmatic',
+    NULL,
+    true,
+    4
   )
 ON CONFLICT (source_key) DO NOTHING;

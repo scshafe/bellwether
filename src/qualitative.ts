@@ -87,6 +87,9 @@ export type RssAtomIngestPollerOptions = {
   logger?: Pick<Console, "error" | "log">;
 };
 
+export const ALPACA_NEWS_SOURCE_ID = "77777777-7777-4777-8777-777777777777";
+export const ALPACA_NEWS_SOURCE_KEY = "alpaca-news";
+
 const EXCERPT_MAX_CHARS = 240;
 const TICKER_STOPWORDS = new Set([
   "A",
@@ -259,6 +262,26 @@ export async function ensureSourcesSchema(pool: Pool): Promise<void> {
 
 export async function ensureQualitativeItemsSchema(pool: Pool): Promise<void> {
   await pool.query(await readFile(new URL("../db/bootstrap/006_qualitative_items.sql", import.meta.url), "utf8"));
+}
+
+export async function ensureAlpacaNewsSource(pool: Pool): Promise<SourceRecord> {
+  const result = await pool.query<SourceRow>(
+    `
+      INSERT INTO sources (id, source_key, name, source_type, feed_url, enabled, quality_rating)
+      VALUES ($1, $2, $3, 'programmatic', NULL, true, 4)
+      ON CONFLICT (source_key) DO UPDATE SET
+        name = EXCLUDED.name,
+        source_type = EXCLUDED.source_type,
+        feed_url = EXCLUDED.feed_url,
+        enabled = EXCLUDED.enabled,
+        quality_rating = EXCLUDED.quality_rating,
+        updated_at = now()
+      RETURNING id, source_key, name, source_type, feed_url, enabled, quality_rating, created_at, updated_at
+    `,
+    [ALPACA_NEWS_SOURCE_ID, ALPACA_NEWS_SOURCE_KEY, "Alpaca News"]
+  );
+
+  return rowToSource(result.rows[0]);
 }
 
 export async function pollQualitativeFeedsOnce(options: Omit<RssAtomIngestPollerOptions, "pollIntervalMs" | "signal"> & { signal?: AbortSignal }): Promise<PollQualitativeFeedsOnceResult> {
@@ -440,7 +463,7 @@ function shortExcerpt(value: string): string {
   return `${sliced}...`;
 }
 
-function extractTickers(value: string): string[] {
+export function extractTickers(value: string): string[] {
   const tickers = new Set<string>();
   const cashtagMatches = value.matchAll(/\$([A-Z]{1,5})(?![A-Z])/gu);
 

@@ -5,10 +5,13 @@ import { pathToFileURL } from "node:url";
 
 import type { Pool } from "pg";
 
+import { runAlpacaNewsIngestStream } from "./alpaca-news.js";
+import { createAlpacaPaperSecretsStore } from "./broker.js";
 import { createPool } from "./db.js";
 import { runLiveTradeCycle } from "./live-cycle.js";
 import { createAgentRuntime } from "./placement.js";
 import {
+  ensureAlpacaNewsSource,
   ensureQualitativeItemsSchema,
   ensureSourcesSchema,
   PostgresQualitativeItemsStore,
@@ -22,6 +25,7 @@ import {
   recordLiveCycleSuccess,
   type ClaimedRuntimeJob
 } from "./runtime-control.js";
+import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 
 const WORKER_LOCK_ID = 420_001;
 const workerPlacement = createAgentRuntime().describeWorkerPlacement();
@@ -39,13 +43,16 @@ process.on("SIGTERM", () => {
 export async function runWorker(): Promise<void> {
   const pool = createPool();
   const qualitativePollerController = new AbortController();
+  const alpacaNewsController = new AbortController();
   let qualitativePoller: Promise<void> | undefined;
+  let alpacaNewsStream: Promise<void> | undefined;
 
   try {
     await pool.query("SELECT 1");
     await ensureAgentRuntimeControlSchema(pool);
     await ensureSourcesSchema(pool);
     await ensureQualitativeItemsSchema(pool);
+    await ensureAlpacaNewsSource(pool);
     qualitativePoller = runRssAtomIngestPoller({
       sourcesStore: new PostgresSourcesStore(pool),
       itemsStore: new PostgresQualitativeItemsStore(pool),
@@ -53,6 +60,17 @@ export async function runWorker(): Promise<void> {
       signal: qualitativePollerController.signal,
       logger: console
     });
+    try {
+      const credentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
+      alpacaNewsStream = runAlpacaNewsIngestStream({
+        credentialVault,
+        itemsStore: new PostgresQualitativeItemsStore(pool),
+        signal: alpacaNewsController.signal,
+        logger: console
+      });
+    } catch (error: unknown) {
+      console.warn(`alpaca news ingest disabled: ${error instanceof Error ? error.message : "unknown credential error"}`);
+    }
     await writeFile(workerPlacement.readyFile, "ready\n");
 
     while (shouldRun) {
@@ -74,7 +92,11 @@ export async function runWorker(): Promise<void> {
     }
   } finally {
     qualitativePollerController.abort();
+    alpacaNewsController.abort();
     await qualitativePoller?.catch((error: unknown) => {
+      console.error(error);
+    });
+    await alpacaNewsStream?.catch((error: unknown) => {
       console.error(error);
     });
     await rm(workerPlacement.readyFile, { force: true });
