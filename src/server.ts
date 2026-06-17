@@ -16,6 +16,12 @@ import type { BrokerAdapter } from "./broker.js";
 import type { QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
 import {
+  fallbackStrategyChatReply,
+  StrategyChatAgent,
+  type StrategyChatMode,
+  type StrategyChatStore
+} from "./strategy-chat.js";
+import {
   StrategyLifecycleError,
   StrategyNotFoundError,
   type CreateStrategyInput,
@@ -23,6 +29,7 @@ import {
   type StrategyStore,
   type UpdateStrategyPatch
 } from "./strategy.js";
+import type { ReasoningModel } from "./llm.js";
 
 export type ServerOptions = {
   databaseUrl?: string;
@@ -31,6 +38,8 @@ export type ServerOptions = {
   decisionLogStore?: AgentDecisionLogStore;
   runtimeControl?: AgentRuntimeControl;
   strategyStore?: StrategyStore;
+  strategyChatStore?: StrategyChatStore;
+  strategyChatModel?: ReasoningModel;
   staticAssetsDir?: string;
 };
 
@@ -151,6 +160,28 @@ export async function handleRequest(
   }
 
   const strategyRoute = parseStrategyRoute(url.pathname);
+
+  if (request.method === "GET" && strategyRoute && strategyRoute.action === "chat") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleStrategyChatHistory(response, options.strategyStore, options.strategyChatStore, strategyRoute.id);
+    return;
+  }
+
+  if (request.method === "POST" && strategyRoute && strategyRoute.action === "chat") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleStrategyChatPost(request, response, options, strategyRoute.id);
+    return;
+  }
 
   if (request.method === "PATCH" && strategyRoute && strategyRoute.action === null) {
     const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
@@ -372,6 +403,110 @@ async function writeStrategyMutationResult(
   } catch (error: unknown) {
     writeStrategyError(response, error);
   }
+}
+
+async function handleStrategyChatHistory(
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined,
+  chatStore: StrategyChatStore | undefined,
+  strategyId: string
+): Promise<void> {
+  const strategy = await loadChatStrategy(response, strategyStore, strategyId);
+
+  if (!strategy) {
+    return;
+  }
+
+  if (!chatStore) {
+    writeJson(response, 503, { error: "strategy_chat_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, { thread: await chatStore.listMessages(strategy.id) });
+}
+
+async function handleStrategyChatPost(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: ServerOptions,
+  strategyId: string
+): Promise<void> {
+  const strategy = await loadChatStrategy(response, options.strategyStore, strategyId);
+
+  if (!strategy) {
+    return;
+  }
+
+  if (!options.strategyChatStore) {
+    writeJson(response, 503, { error: "strategy_chat_unavailable" });
+    return;
+  }
+
+  if (!options.strategyChatModel) {
+    writeJson(response, 503, { error: "strategy_chat_model_unavailable" });
+    return;
+  }
+
+  let body: unknown;
+
+  try {
+    body = await readJsonBody(request);
+  } catch {
+    writeJson(response, 400, { error: "invalid_json" });
+    return;
+  }
+
+  const input = toStrategyChatPostInput(body);
+
+  if (!input) {
+    writeJson(response, 400, { error: "invalid_chat_payload" });
+    return;
+  }
+
+  const priorThread = await options.strategyChatStore.listMessages(strategy.id);
+  await options.strategyChatStore.appendMessage({ strategyId: strategy.id, role: "user", content: input.content });
+
+  let reply = fallbackStrategyChatReply();
+
+  try {
+    reply = await new StrategyChatAgent(options.strategyChatModel).reply({
+      strategy,
+      operatorMessage: input.content,
+      priorThread,
+      mode: input.mode
+    });
+  } catch {
+    reply = fallbackStrategyChatReply();
+  }
+
+  const message = await options.strategyChatStore.appendMessage({
+    strategyId: strategy.id,
+    role: "analyst",
+    content: reply.content,
+    metadata: reply.metadata
+  });
+
+  writeJson(response, 200, { message });
+}
+
+async function loadChatStrategy(
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined,
+  strategyId: string
+): Promise<StrategyRecord | null> {
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return null;
+  }
+
+  const strategy = await strategyStore.getStrategy(strategyId);
+
+  if (!strategy) {
+    writeJson(response, 404, { error: "strategy_not_found" });
+    return null;
+  }
+
+  return strategy;
 }
 
 function writeStrategyError(response: ServerResponse, error: unknown): void {
@@ -721,6 +856,21 @@ function toOptionalStrategyReason(value: unknown): string | undefined | typeof i
   }
 
   return typeof value.reason === "string" ? value.reason : invalidStrategyReason;
+}
+
+function toStrategyChatPostInput(value: unknown): { content: string; mode?: StrategyChatMode } | null {
+  if (!isRecord(value) || typeof value.content !== "string" || !value.content.trim()) {
+    return null;
+  }
+
+  if (value.mode !== undefined && value.mode !== "formalize" && value.mode !== "brainstorm") {
+    return null;
+  }
+
+  return {
+    content: value.content,
+    ...(value.mode ? { mode: value.mode } : {})
+  };
 }
 
 function toQuantPlaybookParameters(value: unknown): QuantPlaybookParameters | null {

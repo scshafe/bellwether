@@ -17,9 +17,11 @@ import type {
   BrokerPosition
 } from "./broker.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord } from "./identity.js";
+import type { LlmJsonRequest, ReasoningModel } from "./llm.js";
 import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.js";
 import { createServer, type ServerOptions } from "./server.js";
 import { InMemoryStrategyStore, type StrategyRecord } from "./strategy.js";
+import { InMemoryStrategyChatStore, type StrategyChatMessage } from "./strategy-chat.js";
 import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
 
 class StubBrokerAdapter implements BrokerAdapter {
@@ -59,6 +61,45 @@ class StubBrokerAdapter implements BrokerAdapter {
   }
 
   async *streamFills(_options?: BrokerFillStreamOptions): AsyncIterable<BrokerFill> {}
+}
+
+class CountingBrokerAdapter extends StubBrokerAdapter {
+  placeOrderCalls = 0;
+
+  override async placeOrder(order: BrokerOrderRequest): Promise<BrokerOrder> {
+    this.placeOrderCalls += 1;
+    return {
+      id: `order-${this.placeOrderCalls}`,
+      clientOrderId: order.clientOrderId,
+      symbol: order.symbol,
+      qty: String(order.qty),
+      side: order.side,
+      type: order.type,
+      timeInForce: order.timeInForce,
+      status: "accepted"
+    };
+  }
+}
+
+class QueueReasoningModel implements ReasoningModel {
+  readonly requests: LlmJsonRequest[] = [];
+
+  constructor(private readonly responses: Array<unknown | Error>) {}
+
+  async generateJson(request: LlmJsonRequest): Promise<unknown> {
+    this.requests.push(request);
+    const next = this.responses.shift();
+
+    if (next instanceof Error) {
+      throw next;
+    }
+
+    if (next === undefined) {
+      throw new Error("unexpected model request");
+    }
+
+    return next;
+  }
 }
 
 class InMemoryRuntimeControl implements AgentRuntimeControl {
@@ -665,6 +706,175 @@ describe("portal strategy registry API", () => {
       assert.deepEqual(await missingResponse.json(), { error: "strategy_store_unavailable" });
     } finally {
       await closeTestServer(missingStarted.server);
+    }
+  });
+});
+
+describe("portal strategy chat API", () => {
+  it("persists an advisory formalization reply without mutating the strategy or placing orders", async () => {
+    const strategyStore = new RecordingStrategyStore();
+    const chatStore = new InMemoryStrategyChatStore();
+    const broker = new CountingBrokerAdapter();
+    const model = new QueueReasoningModel([
+      {
+        mode: "formalize",
+        content: "Advisory proposal: tighten the strategy to hold fewer open positions while the operator reviews the mandate.",
+        proposedParameterDelta: { maxOpenPositions: 3 }
+      }
+    ]);
+    const strategy = await strategyStore.createStrategy({ name: "Chat target", description: "Momentum mandate", parameters: strategyParameters() });
+    const originalStrategy = await strategyStore.getStrategy(strategy.id);
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      strategyStore,
+      strategyChatStore: chatStore,
+      strategyChatModel: model,
+      broker
+    });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const viewerToken = await authenticate(started.baseUrl, "family");
+      const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
+        content: "Formalize this mandate into a tighter max-open-positions proposal.",
+        mode: "formalize"
+      });
+      const body = (await response.json()) as { message?: StrategyChatMessage };
+      const currentStrategy = await strategyStore.getStrategy(strategy.id);
+      const historyResponse = await fetch(`${started.baseUrl}/portal/strategies/${strategy.id}/chat`, {
+        headers: { authorization: `Bearer ${viewerToken}` }
+      });
+      const historyBody = (await historyResponse.json()) as { thread?: StrategyChatMessage[] };
+      const request = model.requests[0];
+      const prompt = JSON.parse(request?.userPrompt ?? "{}") as Record<string, unknown>;
+
+      assert.equal(response.status, 200);
+      assert.equal(body.message?.role, "analyst");
+      assert.equal(body.message?.metadata?.mode, "formalize");
+      assert.deepEqual(body.message?.metadata?.proposedParameterDelta, { maxOpenPositions: 3 });
+      assert.deepEqual(currentStrategy, originalStrategy);
+      assert.equal(broker.placeOrderCalls, 0);
+      assert.equal(historyResponse.status, 200);
+      assert.deepEqual(historyBody.thread?.map((message) => message.role), ["user", "analyst"]);
+      assert.equal(request?.schemaName, "strategy_chat_turn");
+      assert.match(request?.systemPrompt ?? "", /Do not mention broker endpoint class or account mode/u);
+      assert.equal((prompt.strategy as { id?: string } | undefined)?.id, strategy.id);
+      assert.equal((prompt.quantPlaybookParameters as QuantPlaybookParameters | undefined)?.maxOpenPositions, strategy.parameters.maxOpenPositions);
+      assert.equal(prompt.operatorMessage, "Formalize this mandate into a tighter max-open-positions proposal.");
+      assert.deepEqual(prompt.priorThread, []);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("returns brainstorm candidate ideas through the same advisory chat turn", async () => {
+    const strategyStore = new RecordingStrategyStore();
+    const chatStore = new InMemoryStrategyChatStore();
+    const model = new QueueReasoningModel([
+      {
+        mode: "brainstorm",
+        content: "Two candidates are worth discussing; start with a quality momentum variant.",
+        candidateIdeas: [
+          {
+            name: "Quality momentum",
+            mandate: "Favor liquid large-cap names with persistent momentum and lower volatility.",
+            suggestedParameters: { minMomentumFraction: 0.02, maxVolatilityFraction: 0.06 }
+          }
+        ]
+      }
+    ]);
+    const strategy = await strategyStore.createStrategy({ name: "Brainstorm target", parameters: strategyParameters() });
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      strategyStore,
+      strategyChatStore: chatStore,
+      strategyChatModel: model
+    });
+
+    try {
+      const managerToken = await authenticate(started.baseUrl, "brother");
+      const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, managerToken, {
+        content: "Brainstorm candidate strategies for volatile markets.",
+        mode: "brainstorm"
+      });
+      const body = (await response.json()) as { message?: StrategyChatMessage };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.message?.metadata?.mode, "brainstorm");
+      assert.equal(body.message?.metadata?.candidateIdeas?.[0]?.name, "Quality momentum");
+      assert.deepEqual(body.message?.metadata?.candidateIdeas?.[0]?.suggestedParameters, {
+        minMomentumFraction: 0.02,
+        maxVolatilityFraction: 0.06
+      });
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("gates chat reads and writes and returns 404 for unknown strategies before persisting", async () => {
+    const strategyStore = new RecordingStrategyStore();
+    const chatStore = new InMemoryStrategyChatStore();
+    const model = new QueueReasoningModel([]);
+    const strategy = await strategyStore.createStrategy({ name: "Gated chat target", parameters: strategyParameters() });
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      strategyStore,
+      strategyChatStore: chatStore,
+      strategyChatModel: model
+    });
+
+    try {
+      const viewerToken = await authenticate(started.baseUrl, "family");
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const viewerPost = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, viewerToken, { content: "try write" });
+      const unauthenticatedGet = await fetch(`${started.baseUrl}/portal/strategies/${strategy.id}/chat`);
+      const unknownResponse = await postJson(
+        started.baseUrl,
+        "/portal/strategies/99999999-9999-4999-8999-999999999999/chat",
+        adminToken,
+        { content: "unknown" }
+      );
+
+      assert.equal(viewerPost.status, 403);
+      assert.deepEqual(await viewerPost.json(), { error: "forbidden" });
+      assert.equal(unauthenticatedGet.status, 401);
+      assert.deepEqual(await unauthenticatedGet.json(), { error: "missing_session" });
+      assert.equal(unknownResponse.status, 404);
+      assert.deepEqual(await unknownResponse.json(), { error: "strategy_not_found" });
+      assert.deepEqual(await chatStore.listMessages("99999999-9999-4999-8999-999999999999"), []);
+      assert.equal(model.requests.length, 0);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("persists the user message and a clear fallback when the model fails", async () => {
+    const strategyStore = new RecordingStrategyStore();
+    const chatStore = new InMemoryStrategyChatStore();
+    const model = new QueueReasoningModel([new Error("timeout")]);
+    const strategy = await strategyStore.createStrategy({ name: "Fallback target", parameters: strategyParameters() });
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      strategyStore,
+      strategyChatStore: chatStore,
+      strategyChatModel: model
+    });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
+        content: "Please formalize despite the outage."
+      });
+      const body = (await response.json()) as { message?: StrategyChatMessage };
+      const thread = await chatStore.listMessages(strategy.id);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.message?.metadata?.fallback, true);
+      assert.match(body.message?.content ?? "", /could not complete/u);
+      assert.deepEqual(thread.map((message) => message.role), ["user", "analyst"]);
+      assert.equal(thread[0]?.content, "Please formalize despite the outage.");
+    } finally {
+      await closeTestServer(started.server);
     }
   });
 });

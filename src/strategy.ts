@@ -447,7 +447,7 @@ function normalizeStrategyName(name: string): string {
   return trimmedName;
 }
 
-function validateStrategyParameters(parameters: QuantPlaybookParameters): void {
+export function validateStrategyParameters(parameters: QuantPlaybookParameters): void {
   for (const [name, value] of Object.entries(parameters)) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new Error(`strategy parameter ${name} must be a finite number`);
