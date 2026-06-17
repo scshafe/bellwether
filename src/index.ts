@@ -6,19 +6,14 @@ import {
 import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./agent-team.js";
 import { createPool } from "./db.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord, type Role } from "./identity.js";
-import {
-  createOpenAiOAuthSecretsStore,
-  createReasoningModel,
-  OPENAI_OAUTH_PROVIDER_ID,
-  SecretsBackedLlmCredentialVault
-} from "./llm.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
 import { ensureQualitativeItemsSchema, ensureSourcesSchema, PostgresSourcesStore } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
 import { ensureStrategiesSchema, PostgresStrategyStore } from "./strategy.js";
-import { ensureStrategyChatSchema, PostgresStrategyChatStore, withStrategyChatSchemaHints } from "./strategy-chat.js";
+import { createOptionalStrategyChatModel } from "./server-chat-model.js";
+import { ensureStrategyChatSchema, PostgresStrategyChatStore } from "./strategy-chat.js";
 
 const endpoints = readServerEndpointsConfig();
 const { databaseUrl } = readDatabaseUrlConfig();
@@ -32,7 +27,6 @@ await ensureSourcesSchema(pool);
 await ensureQualitativeItemsSchema(pool);
 
 const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
-const llmCredentialVault = new SecretsBackedLlmCredentialVault(await createOpenAiOAuthSecretsStore());
 const server = createServer({
   databaseUrl,
   identityProvider: createIdentityProvider(process.env),
@@ -41,7 +35,7 @@ const server = createServer({
   runtimeControl: new PostgresAgentRuntimeControl(pool),
   strategyStore: new PostgresStrategyStore(pool),
   strategyChatStore: new PostgresStrategyChatStore(pool),
-  strategyChatModel: withStrategyChatSchemaHints(createReasoningModel(llmCredentialVault, { providerId: OPENAI_OAUTH_PROVIDER_ID })),
+  strategyChatModel: await createOptionalStrategyChatModel(),
   sourcesStore: new PostgresSourcesStore(pool),
   staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
 });

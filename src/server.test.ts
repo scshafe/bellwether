@@ -1120,6 +1120,30 @@ describe("portal strategy chat API", () => {
       await closeTestServer(started.server);
     }
   });
+
+  it("returns 503 without persisting when the optional strategy chat model is unavailable", async () => {
+    const strategyStore = new RecordingStrategyStore();
+    const chatStore = new InMemoryStrategyChatStore();
+    const strategy = await strategyStore.createStrategy({ name: "No model target", parameters: strategyParameters() });
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      strategyStore,
+      strategyChatStore: chatStore
+    });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
+        content: "Try the chat turn without a model."
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: "strategy_chat_model_unavailable" });
+      assert.deepEqual(await chatStore.listMessages(strategy.id), []);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
 });
 
 describe("portal runtime control API", () => {
