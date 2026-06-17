@@ -43,6 +43,10 @@ button.ghost {
   background: transparent;
 }
 
+button.danger {
+  background: #991b1b;
+}
+
 input {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.36);
@@ -267,10 +271,6 @@ tr:last-child td {
   border-bottom: 0;
 }
 
-.placeholder-panel {
-  min-height: 18rem;
-}
-
 .decision-empty {
   border: 1px dashed rgba(148, 163, 184, 0.34);
   border-radius: 0.9rem;
@@ -414,6 +414,57 @@ tr:last-child td {
   color: #e2e8f0;
 }
 
+.control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.runtime-card {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1rem;
+  background: rgba(2, 6, 23, 0.52);
+  padding: 0.9rem;
+}
+
+.runtime-card h3 {
+  margin: 0;
+  font-size: clamp(1.4rem, 3vw, 2.4rem);
+  text-transform: uppercase;
+}
+
+.runtime-card.running h3 {
+  color: #86efac;
+}
+
+.runtime-card.stopped h3 {
+  color: #fca5a5;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 0.8rem 0;
+}
+
+.runtime-grid div {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.75rem;
+  background: rgba(15, 23, 42, 0.58);
+  padding: 0.65rem;
+  min-width: 0;
+}
+
+.runtime-grid span {
+  display: block;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 @media (max-width: 920px) {
   .masthead,
   .login-panel,
@@ -438,8 +489,13 @@ tr:last-child td {
   .decision-card-header,
   .decision-meta,
   .glass-grid,
-  .qualitative-slot {
+  .qualitative-slot,
+  .runtime-grid {
     grid-template-columns: 1fr;
+  }
+
+  .control-actions {
+    justify-content: stretch;
   }
 
   .id-stack {

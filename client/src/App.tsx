@@ -4,6 +4,7 @@ import { createSession, setPassword, setUsername, signOut } from "./store/authSl
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
+import { fetchRuntimeStatus, startAgentRuntime, stopAgentRuntime, type RuntimeStateSnapshot } from "./store/runtimeSlice";
 import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
@@ -16,6 +17,8 @@ export function App(): ReactElement {
   const dispatch = useAppDispatch();
   const auth = useAppSelector((state) => state.auth);
   const activeTab = useAppSelector((state) => state.workspace.activeTab);
+  const canManageRuntime = auth.user ? isRuntimeManager(auth.user.role) : false;
+  const visibleTabs = canManageRuntime ? tabs : tabs.filter((tab) => tab.id !== "control");
 
   const submitSession = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -24,6 +27,7 @@ export function App(): ReactElement {
       .then(() => {
         void dispatch(fetchPortalPositions());
         void dispatch(fetchPortalDecisions());
+        void dispatch(fetchRuntimeStatus());
       });
   };
 
@@ -55,7 +59,7 @@ export function App(): ReactElement {
       ) : (
         <section className="workspace">
           <nav className="tabs" aria-label="Portal workspace">
-            {tabs.map((tab) => (
+            {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -69,9 +73,9 @@ export function App(): ReactElement {
             ))}
           </nav>
 
-          {activeTab === "positions" ? <PositionsWorkspace /> : null}
           {activeTab === "decisions" ? <DecisionsWorkspace /> : null}
-          {activeTab === "control" ? <DeferredWorkspace /> : null}
+          {activeTab === "control" && canManageRuntime ? <ControlWorkspace /> : null}
+          {activeTab === "positions" || (activeTab === "control" && !canManageRuntime) ? <PositionsWorkspace /> : null}
         </section>
       )}
     </main>
@@ -405,14 +409,64 @@ function PositionsTable({ positions }: { positions: PortalPosition[] }): ReactEl
   );
 }
 
-function DeferredWorkspace(): ReactElement {
+function ControlWorkspace(): ReactElement {
+  const dispatch = useAppDispatch();
+  const snapshot = useAppSelector((state) => state.runtime.snapshot);
+  const status = useAppSelector((state) => state.runtime.status);
+  const mutationStatus = useAppSelector((state) => state.runtime.mutationStatus);
+  const error = useAppSelector((state) => state.runtime.error);
+  const refreshedAt = useAppSelector((state) => state.runtime.refreshedAt);
+  const running = snapshot?.state === "running";
+  const busy = status === "loading" || mutationStatus === "loading";
+
   return (
-    <section className="panel placeholder-panel">
-      <p className="eyebrow">Not Rendered Until Selected</p>
-      <h2>P4d start/stop control</h2>
-      <p className="muted">This tab is a structural slot for the next Portal-MVP slice. No hidden subtree is mounted for inactive workspaces.</p>
+    <section className="panel">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">POST /portal/runtime/start | stop</p>
+          <h2>Agent Runtime Control</h2>
+        </div>
+        <div className="control-actions">
+          <button type="button" className="ghost" onClick={() => dispatch(fetchRuntimeStatus())} disabled={busy}>
+            {status === "loading" ? "Refreshing..." : "Refresh"}
+          </button>
+          <button type="button" onClick={() => dispatch(startAgentRuntime())} disabled={busy || running}>
+            {mutationStatus === "loading" && !running ? "Starting..." : "Start One Cycle"}
+          </button>
+          <button type="button" className="danger" onClick={() => dispatch(stopAgentRuntime())} disabled={busy || !running}>
+            {mutationStatus === "loading" && running ? "Stopping..." : "Stop"}
+          </button>
+        </div>
+      </header>
+
+      {error ? <p className="error">{error}</p> : null}
+      {refreshedAt ? <p className="muted">Last refresh {new Date(refreshedAt).toLocaleString()}</p> : null}
+      {snapshot ? <RuntimeStatusCard snapshot={snapshot} /> : <p className="empty">No runtime status loaded yet. Use Refresh.</p>}
+      <p className="muted">Start enqueues exactly one live paper-trading cycle. Use the Decision Log refresh after the worker completes to see the persisted glass-box entry.</p>
     </section>
   );
+}
+
+function RuntimeStatusCard({ snapshot }: { snapshot: RuntimeStateSnapshot }): ReactElement {
+  return (
+    <section className={snapshot.state === "running" ? "runtime-card running" : "runtime-card stopped"}>
+      <div>
+        <p className="eyebrow">Runtime</p>
+        <h3>{snapshot.state}</h3>
+      </div>
+      <div className="runtime-grid">
+        <Meta label="Active Job" value={snapshot.activeJobId ?? "none"} />
+        <Meta label="Updated" value={formatDateTime(snapshot.updatedAt)} />
+        <Meta label="Last Outcome" value={snapshot.lastCycle?.status ?? "none"} />
+        <Meta label="Decision Log" value={snapshot.lastCycle?.decisionLogId ?? "none"} />
+      </div>
+      {snapshot.lastCycle ? <p>{snapshot.lastCycle.summary}</p> : <p className="muted">No completed cycle outcome recorded yet.</p>}
+    </section>
+  );
+}
+
+function isRuntimeManager(role: string): boolean {
+  return role === "admin" || role === "manager";
 }
 
 function formatMoney(raw: string): string {

@@ -17,6 +17,7 @@ import type {
   BrokerPosition
 } from "./broker.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord } from "./identity.js";
+import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.js";
 import { createServer, type ServerOptions } from "./server.js";
 
 class StubBrokerAdapter implements BrokerAdapter {
@@ -56,6 +57,45 @@ class StubBrokerAdapter implements BrokerAdapter {
   }
 
   async *streamFills(_options?: BrokerFillStreamOptions): AsyncIterable<BrokerFill> {}
+}
+
+class InMemoryRuntimeControl implements AgentRuntimeControl {
+  starts = 0;
+  stops = 0;
+  private status: AgentRuntimeStatus = {
+    state: "stopped",
+    activeJobId: null,
+    lastCycle: null,
+    updatedAt: "2026-06-17T14:00:00.000Z"
+  };
+
+  async getStatus(): Promise<AgentRuntimeStatus> {
+    return this.status;
+  }
+
+  async start(): Promise<AgentRuntimeStatus> {
+    this.starts += 1;
+    this.status = { ...this.status, state: "running", activeJobId: `job-${this.starts}`, updatedAt: "2026-06-17T14:01:00.000Z" };
+    return this.status;
+  }
+
+  async stop(): Promise<AgentRuntimeStatus> {
+    this.stops += 1;
+    this.status = {
+      ...this.status,
+      state: "stopped",
+      activeJobId: null,
+      lastCycle: {
+        jobId: `job-${this.starts}`,
+        status: "cancelled",
+        summary: "Stopped before worker claimed the queued live cycle.",
+        decisionLogId: null,
+        completedAt: "2026-06-17T14:02:00.000Z"
+      },
+      updatedAt: "2026-06-17T14:02:00.000Z"
+    };
+    return this.status;
+  }
 }
 
 async function startTestServer(options: ServerOptions = {}): Promise<{ baseUrl: string; server: Server }> {
@@ -359,6 +399,102 @@ describe("portal read API", () => {
     } finally {
       await closeTestServer(started.server);
     }
+  });
+});
+
+describe("portal runtime control API", () => {
+  let server: Server;
+  let baseUrl = "";
+  let runtimeControl: InMemoryRuntimeControl;
+
+  before(async () => {
+    runtimeControl = new InMemoryRuntimeControl();
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), runtimeControl });
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("returns runtime status to viewer-or-higher roles", async () => {
+    const token = await authenticate(baseUrl, "family");
+    const response = await fetch(`${baseUrl}/portal/runtime`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const body = (await response.json()) as AgentRuntimeStatus;
+
+    assert.equal(response.status, 200);
+    assert.equal(body.state, "stopped");
+  });
+
+  it("allows admins to start exactly one queued runtime cycle", async () => {
+    const token = await authenticate(baseUrl, "cole");
+    const response = await fetch(`${baseUrl}/portal/runtime/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const body = (await response.json()) as AgentRuntimeStatus;
+
+    assert.equal(response.status, 202);
+    assert.equal(body.state, "running");
+    assert.equal(body.activeJobId, "job-1");
+    assert.equal(runtimeControl.starts, 1);
+  });
+
+  it("allows managers to stop the runtime through the same admin boundary", async () => {
+    const token = await authenticate(baseUrl, "brother");
+    const response = await fetch(`${baseUrl}/portal/runtime/stop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const body = (await response.json()) as AgentRuntimeStatus;
+
+    assert.equal(response.status, 200);
+    assert.equal(body.state, "stopped");
+    assert.equal(body.lastCycle?.status, "cancelled");
+    assert.equal(runtimeControl.stops, 1);
+  });
+
+  it("allows managers to start and admins to stop through adminBoundaryRoles", async () => {
+    const managerToken = await authenticate(baseUrl, "brother");
+    const startResponse = await fetch(`${baseUrl}/portal/runtime/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${managerToken}` }
+    });
+    const startBody = (await startResponse.json()) as AgentRuntimeStatus;
+    const adminToken = await authenticate(baseUrl, "cole");
+    const stopResponse = await fetch(`${baseUrl}/portal/runtime/stop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminToken}` }
+    });
+    const stopBody = (await stopResponse.json()) as AgentRuntimeStatus;
+
+    assert.equal(startResponse.status, 202);
+    assert.equal(startBody.state, "running");
+    assert.equal(startBody.activeJobId, "job-2");
+    assert.equal(stopResponse.status, 200);
+    assert.equal(stopBody.state, "stopped");
+    assert.equal(runtimeControl.starts, 2);
+    assert.equal(runtimeControl.stops, 2);
+  });
+
+  it("blocks viewers from start and stop controls", async () => {
+    const token = await authenticate(baseUrl, "family");
+    const startResponse = await fetch(`${baseUrl}/portal/runtime/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const stopResponse = await fetch(`${baseUrl}/portal/runtime/stop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+
+    assert.equal(startResponse.status, 403);
+    assert.equal(stopResponse.status, 403);
+    assert.equal(runtimeControl.starts, 2);
+    assert.equal(runtimeControl.stops, 2);
   });
 });
 

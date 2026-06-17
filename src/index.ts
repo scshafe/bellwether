@@ -7,6 +7,7 @@ import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./a
 import { createPool } from "./db.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord, type Role } from "./identity.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
+import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
 
@@ -15,6 +16,7 @@ const { databaseUrl } = readDatabaseUrlConfig();
 const pool = createPool(databaseUrl);
 
 await ensureAgentDecisionLogSchema(pool);
+await ensureAgentRuntimeControlSchema(pool);
 
 const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
 const server = createServer({
@@ -22,6 +24,7 @@ const server = createServer({
   identityProvider: createIdentityProvider(process.env),
   broker: new AlpacaPaperAdapter(brokerCredentialVault, ALPACA_PAPER_BROKER_ACCOUNT_ID),
   decisionLogStore: new PostgresAgentDecisionLogStore(pool),
+  runtimeControl: new PostgresAgentRuntimeControl(pool),
   staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
 });
 

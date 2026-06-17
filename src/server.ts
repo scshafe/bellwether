@@ -13,12 +13,14 @@ import {
 } from "./identity.js";
 import type { AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAdapter } from "./broker.js";
+import type { AgentRuntimeControl } from "./runtime-control.js";
 
 export type ServerOptions = {
   databaseUrl?: string;
   identityProvider?: IdentityProvider;
   broker?: BrokerAdapter;
   decisionLogStore?: AgentDecisionLogStore;
+  runtimeControl?: AgentRuntimeControl;
   staticAssetsDir?: string;
 };
 
@@ -80,6 +82,39 @@ export async function handleRequest(
     }
 
     await handlePortalDecisions(response, options.decisionLogStore, parseDecisionLimit(url));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/portal/runtime") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRuntimeStatus(response, options.runtimeControl);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/portal/runtime/start") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRuntimeStart(response, options.runtimeControl);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/portal/runtime/stop") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRuntimeStop(response, options.runtimeControl);
     return;
   }
 
@@ -147,6 +182,33 @@ async function handlePortalDecisions(
   }
 
   writeJson(response, 200, { decisions: await decisionLogStore.listDecisions(limit), limit });
+}
+
+async function handleRuntimeStatus(response: ServerResponse, runtimeControl: AgentRuntimeControl | undefined): Promise<void> {
+  if (!runtimeControl) {
+    writeJson(response, 503, { error: "runtime_control_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, await runtimeControl.getStatus());
+}
+
+async function handleRuntimeStart(response: ServerResponse, runtimeControl: AgentRuntimeControl | undefined): Promise<void> {
+  if (!runtimeControl) {
+    writeJson(response, 503, { error: "runtime_control_unavailable" });
+    return;
+  }
+
+  writeJson(response, 202, await runtimeControl.start());
+}
+
+async function handleRuntimeStop(response: ServerResponse, runtimeControl: AgentRuntimeControl | undefined): Promise<void> {
+  if (!runtimeControl) {
+    writeJson(response, 503, { error: "runtime_control_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, await runtimeControl.stop());
 }
 
 async function handleStaticAssets(

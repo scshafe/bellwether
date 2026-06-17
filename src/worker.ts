@@ -1,18 +1,23 @@
+import { resolve } from "node:path";
 import { rm, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 
 import type { Pool } from "pg";
 
 import { createPool } from "./db.js";
+import { runLiveTradeCycle } from "./live-cycle.js";
 import { createAgentRuntime } from "./placement.js";
+import {
+  claimEnabledLiveCycleJob,
+  ensureAgentRuntimeControlSchema,
+  recordLiveCycleFailure,
+  recordLiveCycleSuccess,
+  type ClaimedRuntimeJob
+} from "./runtime-control.js";
 
 const WORKER_LOCK_ID = 420_001;
 const workerPlacement = createAgentRuntime().describeWorkerPlacement();
-
-type ClaimedJob = {
-  id: string;
-  kind: string;
-};
 
 let shouldRun = true;
 
@@ -24,31 +29,12 @@ process.on("SIGTERM", () => {
   shouldRun = false;
 });
 
-async function claimJob(pool: Pool): Promise<ClaimedJob | null> {
-  const result = await pool.query<ClaimedJob>(`
-    WITH candidate AS (
-      SELECT id
-      FROM agent_jobs
-      WHERE status = 'queued' AND run_after <= now()
-      ORDER BY run_after, created_at
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    UPDATE agent_jobs
-    SET status = 'claimed', claimed_at = now(), updated_at = now()
-    FROM candidate
-    WHERE agent_jobs.id = candidate.id
-    RETURNING agent_jobs.id, agent_jobs.kind
-  `);
-
-  return result.rows[0] ?? null;
-}
-
-async function runWorker(): Promise<void> {
+export async function runWorker(): Promise<void> {
   const pool = createPool();
 
   try {
     await pool.query("SELECT 1");
+    await ensureAgentRuntimeControlSchema(pool);
     await writeFile(workerPlacement.readyFile, "ready\n");
 
     while (shouldRun) {
@@ -56,10 +42,10 @@ async function runWorker(): Promise<void> {
 
       if (lock.rows[0]?.locked) {
         try {
-          const job = await claimJob(pool);
+          const job = await claimEnabledLiveCycleJob(pool);
 
           if (job) {
-            console.log(`claimed job ${job.id} (${job.kind})`);
+            await runClaimedJob(pool, job);
           }
         } finally {
           await pool.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID]);
@@ -74,7 +60,27 @@ async function runWorker(): Promise<void> {
   }
 }
 
-runWorker().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+async function runClaimedJob(pool: Pool, job: ClaimedRuntimeJob): Promise<void> {
+  console.log(`claimed job ${job.id} (${job.kind})`);
+
+  try {
+    const result = await runLiveTradeCycle({ pool, cycleId: `job-${job.id.replaceAll("-", "")}` });
+    const orderId = result.execution.order?.id ?? "no broker order";
+    await recordLiveCycleSuccess(pool, job.id, result.decisionLog.id, `Live cycle completed with ${result.execution.decision}; order ${orderId}.`);
+  } catch (error: unknown) {
+    const summary = error instanceof Error ? error.message : "unknown live cycle failure";
+    await recordLiveCycleFailure(pool, job.id, summary);
+    console.error(`live cycle job ${job.id} failed: ${summary}`);
+  }
+}
+
+function isMainModule(): boolean {
+  return import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href;
+}
+
+if (isMainModule()) {
+  runWorker().catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

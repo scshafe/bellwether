@@ -2,6 +2,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import authReducer from "./store/authSlice";
 import decisionsReducer from "./store/decisionsSlice";
 import positionsReducer from "./store/positionsSlice";
+import runtimeReducer from "./store/runtimeSlice";
 import workspaceReducer from "./store/workspaceSlice";
 
 export const store = configureStore({
@@ -9,6 +10,7 @@ export const store = configureStore({
     auth: authReducer,
     decisions: decisionsReducer,
     positions: positionsReducer,
+    runtime: runtimeReducer,
     workspace: workspaceReducer
   }
 });
