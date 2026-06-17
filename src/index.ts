@@ -14,7 +14,7 @@ import { createServer } from "./server.js";
 import { ensureStrategiesSchema, PostgresStrategyStore } from "./strategy.js";
 import { createOptionalStrategyChatModel } from "./server-chat-model.js";
 import { ensureStrategyChatSchema, PostgresStrategyChatStore } from "./strategy-chat.js";
-import { ensureStrategyProposalsSchema } from "./strategy-proposals.js";
+import { ensureStrategyProposalsSchema, PostgresStrategyProposalsStore } from "./strategy-proposals.js";
 
 const endpoints = readServerEndpointsConfig();
 const { databaseUrl } = readDatabaseUrlConfig();
@@ -36,6 +36,7 @@ const server = createServer({
   decisionLogStore: new PostgresAgentDecisionLogStore(pool),
   runtimeControl: new PostgresAgentRuntimeControl(pool),
   strategyStore: new PostgresStrategyStore(pool),
+  proposalsStore: new PostgresStrategyProposalsStore(pool),
   strategyChatStore: new PostgresStrategyChatStore(pool),
   strategyChatModel: await createOptionalStrategyChatModel(),
   sourcesStore: new PostgresSourcesStore(pool),

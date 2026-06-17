@@ -13,7 +13,7 @@ import {
 } from "./identity.js";
 import type { AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAdapter } from "./broker.js";
-import type { QuantPlaybookParameters } from "./quant-playbook.js";
+import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
 import { isFeatureEnabled } from "./config.js";
 import {
@@ -34,11 +34,17 @@ import {
 import {
   StrategyLifecycleError,
   StrategyNotFoundError,
+  validateStrategyParameters,
   type CreateStrategyInput,
   type StrategyRecord,
   type StrategyStore,
   type UpdateStrategyPatch
 } from "./strategy.js";
+import {
+  StrategyProposalNotFoundError,
+  type StrategyProposalRecord,
+  type StrategyProposalsStore
+} from "./strategy-proposals.js";
 import type { ReasoningModel } from "./llm.js";
 
 export type ServerOptions = {
@@ -48,6 +54,7 @@ export type ServerOptions = {
   decisionLogStore?: AgentDecisionLogStore;
   runtimeControl?: AgentRuntimeControl;
   strategyStore?: StrategyStore;
+  proposalsStore?: StrategyProposalsStore;
   strategyChatStore?: StrategyChatStore;
   strategyChatModel?: ReasoningModel;
   sourcesStore?: SourcesStore;
@@ -113,6 +120,17 @@ export async function handleRequest(
     }
 
     await handlePortalDecisions(response, options.decisionLogStore, parseDecisionLimit(url));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/portal/proposals") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handlePortalProposals(response, options.proposalsStore, parseDecisionLimit(url));
     return;
   }
 
@@ -193,8 +211,20 @@ export async function handleRequest(
     return;
   }
 
+  const proposalRoute = parseProposalRoute(url.pathname);
   const strategyRoute = parseStrategyRoute(url.pathname);
   const rosterRoute = parseRosterRoute(url.pathname);
+
+  if (request.method === "POST" && proposalRoute && proposalRoute.action === "review") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleProposalReview(request, response, options.proposalsStore, options.strategyStore, proposalRoute.id);
+    return;
+  }
 
   if (request.method === "PATCH" && rosterRoute) {
     const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
@@ -331,6 +361,106 @@ async function handlePortalDecisions(
   }
 
   writeJson(response, 200, { decisions: await decisionLogStore.listDecisions(limit), limit });
+}
+
+async function handlePortalProposals(
+  response: ServerResponse,
+  proposalsStore: StrategyProposalsStore | undefined,
+  limit: number
+): Promise<void> {
+  if (!proposalsStore) {
+    writeJson(response, 503, { error: "proposals_store_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, { proposals: await proposalsStore.listPending(limit) });
+}
+
+async function handleProposalReview(
+  request: IncomingMessage,
+  response: ServerResponse,
+  proposalsStore: StrategyProposalsStore | undefined,
+  strategyStore: StrategyStore | undefined,
+  proposalId: string
+): Promise<void> {
+  if (!proposalsStore) {
+    writeJson(response, 503, { error: "proposals_store_unavailable" });
+    return;
+  }
+
+  const body = await readProposalJsonBody(response, request);
+
+  if (body === invalidJsonBody) {
+    return;
+  }
+
+  const decision = toProposalReviewDecision(body);
+
+  if (!decision) {
+    writeJson(response, 400, { error: "invalid_proposal_review_payload" });
+    return;
+  }
+
+  if (decision === "dismiss") {
+    await writeProposalMutationResult(response, () => markProposalDismissed(proposalsStore, proposalId));
+    return;
+  }
+
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return;
+  }
+
+  await writeProposalMutationResult(response, () => acceptProposal(proposalsStore, strategyStore, proposalId));
+}
+
+async function markProposalDismissed(
+  proposalsStore: StrategyProposalsStore,
+  proposalId: string
+): Promise<{ proposal: StrategyProposalRecord }> {
+  return { proposal: await proposalsStore.markReviewed(proposalId, "dismissed") };
+}
+
+async function acceptProposal(
+  proposalsStore: StrategyProposalsStore,
+  strategyStore: StrategyStore,
+  proposalId: string
+): Promise<{ strategy: StrategyRecord; proposal: StrategyProposalRecord }> {
+  const proposal = await findPendingProposal(proposalsStore, proposalId);
+  const parameters = { ...DEFAULT_QUANT_PLAYBOOK_PARAMETERS, ...proposal.suggestedCandidate.suggestedParameters };
+
+  validateStrategyParameters(parameters);
+
+  const strategy = await strategyStore.createStrategy({
+    name: proposal.suggestedCandidate.name,
+    description: proposal.suggestedCandidate.mandate,
+    parameters
+  });
+  const reviewedProposal = await proposalsStore.markReviewed(proposal.id);
+
+  return { strategy, proposal: reviewedProposal };
+}
+
+async function findPendingProposal(proposalsStore: StrategyProposalsStore, proposalId: string): Promise<StrategyProposalRecord> {
+  const normalizedId = proposalId.trim();
+  const proposal = (await proposalsStore.listPending(100)).find((candidate) => candidate.id === normalizedId);
+
+  if (!proposal) {
+    throw new StrategyProposalNotFoundError(proposalId);
+  }
+
+  return proposal;
+}
+
+async function writeProposalMutationResult(
+  response: ServerResponse,
+  operation: () => Promise<{ strategy?: StrategyRecord; proposal: StrategyProposalRecord }>
+): Promise<void> {
+  try {
+    writeJson(response, 200, await operation());
+  } catch (error: unknown) {
+    writeProposalError(response, error);
+  }
 }
 
 async function handlePortalStrategies(
@@ -699,6 +829,15 @@ function writeStrategyError(response: ServerResponse, error: unknown): void {
   writeJson(response, 400, { error: "invalid_strategy_payload" });
 }
 
+function writeProposalError(response: ServerResponse, error: unknown): void {
+  if (error instanceof StrategyProposalNotFoundError) {
+    writeJson(response, 404, { error: "proposal_not_found" });
+    return;
+  }
+
+  writeJson(response, 400, { error: "invalid_proposal_review_payload" });
+}
+
 async function handleRuntimeStatus(response: ServerResponse, runtimeControl: AgentRuntimeControl | undefined): Promise<void> {
   if (!runtimeControl) {
     writeJson(response, 503, { error: "runtime_control_unavailable" });
@@ -924,6 +1063,11 @@ type StrategyRoute = {
   action: string | null;
 };
 
+type ProposalRoute = {
+  id: string;
+  action: string;
+};
+
 type RosterRoute = {
   id: string;
 };
@@ -944,6 +1088,22 @@ function parseStrategyRoute(pathname: string): StrategyRoute | null {
   }
 
   return { id, action: parts[3] ?? null };
+}
+
+function parseProposalRoute(pathname: string): ProposalRoute | null {
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (parts[0] !== "portal" || parts[1] !== "proposals" || parts.length !== 4) {
+    return null;
+  }
+
+  const id = decodeURIComponent(parts[2] ?? "").trim();
+
+  if (!id) {
+    return null;
+  }
+
+  return { id, action: parts[3] ?? "" };
 }
 
 export function parseRosterRoute(pathname: string): RosterRoute | null {
@@ -976,6 +1136,15 @@ async function readStrategyJsonBody(response: ServerResponse, request: IncomingM
 }
 
 async function readSourceJsonBody(response: ServerResponse, request: IncomingMessage): Promise<unknown | typeof invalidJsonBody> {
+  try {
+    return await readJsonBody(request);
+  } catch {
+    writeJson(response, 400, { error: "invalid_json" });
+    return invalidJsonBody;
+  }
+}
+
+async function readProposalJsonBody(response: ServerResponse, request: IncomingMessage): Promise<unknown | typeof invalidJsonBody> {
   try {
     return await readJsonBody(request);
   } catch {
@@ -1220,6 +1389,14 @@ function toOptionalStrategyReason(value: unknown): string | undefined | typeof i
   }
 
   return typeof value.reason === "string" ? value.reason : invalidStrategyReason;
+}
+
+function toProposalReviewDecision(value: unknown): "accept" | "dismiss" | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return value.decision === "accept" || value.decision === "dismiss" ? value.decision : null;
 }
 
 function toStrategyChatPostInput(value: unknown): { content: string; mode?: StrategyChatMode } | null {

@@ -23,6 +23,7 @@ import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.
 import { createServer, parseRosterRoute, type ServerOptions } from "./server.js";
 import { InMemoryStrategyStore, type StrategyRecord } from "./strategy.js";
 import { InMemoryStrategyChatStore, type StrategyChatMessage } from "./strategy-chat.js";
+import { InMemoryStrategyProposalsStore, type StrategyProposalRecord } from "./strategy-proposals.js";
 import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
 
 class StubBrokerAdapter implements BrokerAdapter {
@@ -544,6 +545,170 @@ describe("portal read API", () => {
       assert.deepEqual(await positionsResponse.json(), { error: "broker_unavailable" });
       assert.equal(decisionsResponse.status, 503);
       assert.deepEqual(await decisionsResponse.json(), { error: "decision_log_unavailable" });
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("portal proposal inbox API", () => {
+  it("lists pending proposals to viewer-or-higher roles", async () => {
+    const proposalsStore = new InMemoryStrategyProposalsStore();
+    await proposalsStore.recordProposal({
+      id: "proposal-older",
+      suggestedCandidate: {
+        name: "Older proposal",
+        mandate: "Hold liquid momentum names.",
+        suggestedParameters: { maxOpenPositions: 4 }
+      },
+      quantRationale: "Older quant rationale",
+      qualitativeEvidence: { links: [], quotes: [], signals: [] },
+      createdAt: "2026-06-17T12:00:00.000Z"
+    });
+    await proposalsStore.recordProposal({
+      id: "proposal-newer",
+      suggestedCandidate: {
+        name: "Newer proposal",
+        mandate: "Tighten the mandate while momentum broadens.",
+        suggestedParameters: { minMomentumFraction: 0.02 }
+      },
+      quantRationale: "Newer quant rationale",
+      qualitativeEvidence: { links: [], quotes: [], signals: [] },
+      createdAt: "2026-06-17T13:00:00.000Z"
+    });
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore });
+
+    try {
+      const viewerToken = await authenticate(started.baseUrl, "family");
+      const response = await fetch(`${started.baseUrl}/portal/proposals?limit=1`, {
+        headers: { authorization: `Bearer ${viewerToken}` }
+      });
+      const body = (await response.json()) as { proposals?: StrategyProposalRecord[] };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.proposals?.length, 1);
+      assert.equal(body.proposals?.[0]?.id, "proposal-newer");
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("blocks viewer review before mutating proposals", async () => {
+    const proposalsStore = new InMemoryStrategyProposalsStore();
+    await proposalsStore.recordProposal({
+      id: "proposal-viewer-blocked",
+      suggestedCandidate: {
+        name: "Viewer blocked",
+        mandate: "Operator review required.",
+        suggestedParameters: { maxOpenPositions: 4 }
+      },
+      quantRationale: "Quant rationale",
+      qualitativeEvidence: { links: [], quotes: [], signals: [] }
+    });
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore: new RecordingStrategyStore() });
+
+    try {
+      const viewerToken = await authenticate(started.baseUrl, "family");
+      const response = await postJson(started.baseUrl, "/portal/proposals/proposal-viewer-blocked/review", viewerToken, {
+        decision: "dismiss"
+      });
+      const pending = await proposalsStore.listPending();
+
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), { error: "forbidden" });
+      assert.equal(pending.some((proposal) => proposal.id === "proposal-viewer-blocked"), true);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("accepts a proposal into a draft strategy with defaults merged before deltas", async () => {
+    const proposalsStore = new InMemoryStrategyProposalsStore();
+    const strategyStore = new RecordingStrategyStore();
+    await proposalsStore.recordProposal({
+      id: "proposal-accept",
+      suggestedCandidate: {
+        name: "Quality momentum",
+        mandate: "Favor liquid large-cap names with persistent momentum and lower volatility.",
+        suggestedParameters: { maxOpenPositions: 3, minMomentumFraction: 0.02 }
+      },
+      quantRationale: "Momentum breadth improved while volatility cooled.",
+      qualitativeEvidence: { links: [], quotes: [], signals: [{ label: "Breadth", value: "improving" }] }
+    });
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const response = await postJson(started.baseUrl, "/portal/proposals/proposal-accept/review", adminToken, {
+        decision: "accept"
+      });
+      const body = (await response.json()) as { strategy?: StrategyRecord; proposal?: StrategyProposalRecord };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.strategy?.name, "Quality momentum");
+      assert.equal(body.strategy?.description, "Favor liquid large-cap names with persistent momentum and lower volatility.");
+      assert.equal(body.strategy?.status, "draft");
+      assert.equal(body.strategy?.parameters.minPrice, DEFAULT_QUANT_PLAYBOOK_PARAMETERS.minPrice);
+      assert.equal(body.strategy?.parameters.maxOpenPositions, 3);
+      assert.equal(body.strategy?.parameters.minMomentumFraction, 0.02);
+      assert.equal(body.proposal?.id, "proposal-accept");
+      assert.equal(body.proposal?.status, "reviewed");
+      assert.equal((await proposalsStore.listPending()).some((proposal) => proposal.id === "proposal-accept"), false);
+      assert.equal(strategyStore.calls.at(-1), "createStrategy");
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("dismisses a proposal without creating a strategy", async () => {
+    const proposalsStore = new InMemoryStrategyProposalsStore();
+    const strategyStore = new RecordingStrategyStore();
+    await proposalsStore.recordProposal({
+      id: "proposal-dismiss",
+      suggestedCandidate: {
+        name: "Dismissed proposal",
+        mandate: "Do not adopt this candidate.",
+        suggestedParameters: { maxOpenPositions: 4 }
+      },
+      quantRationale: "Weak rationale",
+      qualitativeEvidence: { links: [], quotes: [], signals: [] }
+    });
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const response = await postJson(started.baseUrl, "/portal/proposals/proposal-dismiss/review", adminToken, {
+        decision: "dismiss"
+      });
+      const body = (await response.json()) as { proposal?: StrategyProposalRecord };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.proposal?.id, "proposal-dismiss");
+      assert.equal(body.proposal?.status, "dismissed");
+      assert.deepEqual(await strategyStore.listStrategies(), []);
+      assert.deepEqual(strategyStore.calls, []);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+
+  it("maps unknown proposal ids and bad review bodies", async () => {
+    const proposalsStore = new InMemoryStrategyProposalsStore();
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore: new RecordingStrategyStore() });
+
+    try {
+      const adminToken = await authenticate(started.baseUrl, "cole");
+      const unknownResponse = await postJson(started.baseUrl, "/portal/proposals/unknown-proposal/review", adminToken, {
+        decision: "accept"
+      });
+      const badResponse = await postJson(started.baseUrl, "/portal/proposals/unknown-proposal/review", adminToken, {
+        decision: "archive"
+      });
+
+      assert.equal(unknownResponse.status, 404);
+      assert.deepEqual(await unknownResponse.json(), { error: "proposal_not_found" });
+      assert.equal(badResponse.status, 400);
+      assert.deepEqual(await badResponse.json(), { error: "invalid_proposal_review_payload" });
     } finally {
       await closeTestServer(started.server);
     }
