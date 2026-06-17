@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import type { Pool } from "pg";
 
@@ -11,7 +12,7 @@ import {
   type UniverseAsset
 } from "./quant-playbook.js";
 
-export const STRATEGY_STATUSES = ["draft", "approved", "active"] as const;
+export const STRATEGY_STATUSES = ["draft", "under_discussion", "approved", "active", "paused", "retired"] as const;
 
 export type StrategyStatus = (typeof STRATEGY_STATUSES)[number];
 
@@ -25,6 +26,10 @@ export type StrategyRecord = {
   updatedAt: string;
   approvedAt?: string;
   activatedAt?: string;
+  discussionStartedAt?: string;
+  pausedAt?: string;
+  retiredAt?: string;
+  reason?: string;
 };
 
 export type CreateStrategyInput = {
@@ -32,6 +37,12 @@ export type CreateStrategyInput = {
   name: string;
   description?: string;
   parameters: QuantPlaybookParameters;
+};
+
+export type UpdateStrategyPatch = {
+  name?: string;
+  description?: string | null;
+  parameters?: QuantPlaybookParameters;
 };
 
 export type StrategyPlaybookInput = {
@@ -44,8 +55,15 @@ export type StrategyPlaybookInput = {
 export interface StrategyStore {
   createStrategy(input: CreateStrategyInput): Promise<StrategyRecord>;
   getStrategy(id: string): Promise<StrategyRecord | null>;
+  listStrategies(limit?: number): Promise<StrategyRecord[]>;
+  updateStrategy(id: string, patch: UpdateStrategyPatch): Promise<StrategyRecord>;
+  startDiscussion(id: string): Promise<StrategyRecord>;
+  returnToDraft(id: string): Promise<StrategyRecord>;
   approveStrategy(id: string): Promise<StrategyRecord>;
   activateStrategy(id: string): Promise<StrategyRecord>;
+  pauseStrategy(id: string, reason?: string): Promise<StrategyRecord>;
+  resumeStrategy(id: string): Promise<StrategyRecord>;
+  retireStrategy(id: string, reason?: string): Promise<StrategyRecord>;
 }
 
 export interface StrategyTradingGate {
@@ -112,6 +130,56 @@ export class InMemoryStrategyStore implements StrategyStore, StrategyTradingGate
     return (await this.getStrategy(strategyId))?.status ?? null;
   }
 
+  async listStrategies(limit = 50): Promise<StrategyRecord[]> {
+    return [...this.strategies.values()]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .slice(0, normalizeStrategiesLimit(limit))
+      .map((strategy) => cloneStrategy(strategy));
+  }
+
+  async updateStrategy(id: string, patch: UpdateStrategyPatch): Promise<StrategyRecord> {
+    const strategy = this.strategies.get(id.trim());
+
+    if (!strategy) {
+      throw new StrategyNotFoundError(id);
+    }
+
+    assertCanUpdateStrategy(strategy);
+
+    const updated: StrategyRecord = {
+      ...strategy,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (patch.name !== undefined) {
+      updated.name = normalizeStrategyName(patch.name);
+    }
+
+    if (patch.description !== undefined) {
+      if (patch.description === null) {
+        delete updated.description;
+      } else {
+        updated.description = patch.description;
+      }
+    }
+
+    if (patch.parameters !== undefined) {
+      validateStrategyParameters(patch.parameters);
+      updated.parameters = { ...patch.parameters };
+    }
+
+    this.strategies.set(updated.id, cloneStrategy(updated));
+    return cloneStrategy(updated);
+  }
+
+  async startDiscussion(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "under_discussion");
+  }
+
+  async returnToDraft(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "draft");
+  }
+
   async approveStrategy(id: string): Promise<StrategyRecord> {
     return this.transition(id, "approved");
   }
@@ -120,7 +188,19 @@ export class InMemoryStrategyStore implements StrategyStore, StrategyTradingGate
     return this.transition(id, "active");
   }
 
-  private transition(id: string, nextStatus: StrategyStatus): StrategyRecord {
+  async pauseStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    return this.transition(id, "paused", reason);
+  }
+
+  async resumeStrategy(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "active");
+  }
+
+  async retireStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    return this.transition(id, "retired", reason);
+  }
+
+  private transition(id: string, nextStatus: StrategyStatus, reason?: string): StrategyRecord {
     const strategy = this.strategies.get(id.trim());
 
     if (!strategy) {
@@ -137,11 +217,25 @@ export class InMemoryStrategyStore implements StrategyStore, StrategyTradingGate
     };
 
     if (nextStatus === "approved") {
-      updated.approvedAt = now;
+      updated.approvedAt ??= now;
     }
 
     if (nextStatus === "active") {
-      updated.activatedAt = now;
+      updated.activatedAt ??= now;
+    }
+
+    if (nextStatus === "under_discussion") {
+      updated.discussionStartedAt ??= now;
+    }
+
+    if (nextStatus === "paused") {
+      updated.pausedAt ??= now;
+      setStrategyReason(updated, reason);
+    }
+
+    if (nextStatus === "retired") {
+      updated.retiredAt ??= now;
+      setStrategyReason(updated, reason);
     }
 
     this.strategies.set(updated.id, cloneStrategy(updated));
@@ -160,7 +254,7 @@ export class PostgresStrategyStore implements StrategyStore, StrategyTradingGate
       `
         INSERT INTO strategies (id, name, description, parameters)
         VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4::jsonb)
-        RETURNING id, name, description, status, parameters, created_at, updated_at, approved_at, activated_at
+        RETURNING ${STRATEGY_RETURNING_COLUMNS}
       `,
       [input.id ?? null, name, input.description ?? null, JSON.stringify(input.parameters)]
     );
@@ -171,7 +265,7 @@ export class PostgresStrategyStore implements StrategyStore, StrategyTradingGate
   async getStrategy(id: string): Promise<StrategyRecord | null> {
     const result = await this.pool.query<StrategyRow>(
       `
-        SELECT id, name, description, status, parameters, created_at, updated_at, approved_at, activated_at
+        SELECT ${STRATEGY_RETURNING_COLUMNS}
         FROM strategies
         WHERE id = $1
       `,
@@ -186,26 +280,105 @@ export class PostgresStrategyStore implements StrategyStore, StrategyTradingGate
     return result.rows[0]?.status ?? null;
   }
 
+  async listStrategies(limit = 50): Promise<StrategyRecord[]> {
+    const result = await this.pool.query<StrategyRow>(
+      `
+        SELECT ${STRATEGY_RETURNING_COLUMNS}
+        FROM strategies
+        ORDER BY created_at DESC, id DESC
+        LIMIT $1
+      `,
+      [normalizeStrategiesLimit(limit)]
+    );
+
+    return result.rows.map(rowToStrategy);
+  }
+
+  async updateStrategy(id: string, patch: UpdateStrategyPatch): Promise<StrategyRecord> {
+    const current = await this.getStrategy(id);
+
+    if (!current) {
+      throw new StrategyNotFoundError(id);
+    }
+
+    assertCanUpdateStrategy(current);
+
+    const name = patch.name !== undefined ? normalizeStrategyName(patch.name) : current.name;
+    const description = patch.description !== undefined ? patch.description : current.description ?? null;
+    const parameters = patch.parameters !== undefined ? patch.parameters : current.parameters;
+    validateStrategyParameters(parameters);
+
+    const result = await this.pool.query<StrategyRow>(
+      `
+        UPDATE strategies
+        SET name = $2,
+            description = $3,
+            parameters = $4::jsonb,
+            updated_at = now()
+        WHERE id = $1 AND status = ANY($5::text[])
+        RETURNING ${STRATEGY_RETURNING_COLUMNS}
+      `,
+      [id.trim(), name, description, JSON.stringify(parameters), STRATEGY_MUTABLE_STATUSES]
+    );
+
+    if (result.rows[0]) {
+      return rowToStrategy(result.rows[0]);
+    }
+
+    const latest = await this.getStrategy(id);
+
+    if (!latest) {
+      throw new StrategyNotFoundError(id);
+    }
+
+    assertCanUpdateStrategy(latest);
+    throw new StrategyLifecycleError(`cannot update strategy ${id} while ${latest.status}`);
+  }
+
+  async startDiscussion(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "under_discussion", ["draft"]);
+  }
+
+  async returnToDraft(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "draft", ["under_discussion"]);
+  }
+
   async approveStrategy(id: string): Promise<StrategyRecord> {
-    return this.transition(id, "approved", "draft");
+    return this.transition(id, "approved", ["draft", "under_discussion"]);
   }
 
   async activateStrategy(id: string): Promise<StrategyRecord> {
-    return this.transition(id, "active", "approved");
+    return this.transition(id, "active", ["approved", "paused"]);
   }
 
-  private async transition(id: string, nextStatus: StrategyStatus, requiredStatus: StrategyStatus): Promise<StrategyRecord> {
+  async pauseStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    return this.transition(id, "paused", ["active"], reason);
+  }
+
+  async resumeStrategy(id: string): Promise<StrategyRecord> {
+    return this.transition(id, "active", ["paused"]);
+  }
+
+  async retireStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    return this.transition(id, "retired", ["active", "paused"], reason);
+  }
+
+  private async transition(id: string, nextStatus: StrategyStatus, requiredStatuses: StrategyStatus[], reason?: string): Promise<StrategyRecord> {
     const result = await this.pool.query<StrategyRow>(
       `
         UPDATE strategies
         SET status = $2,
-            approved_at = CASE WHEN $2 = 'approved' THEN now() ELSE approved_at END,
-            activated_at = CASE WHEN $2 = 'active' THEN now() ELSE activated_at END,
+            approved_at = CASE WHEN $2 = 'approved' THEN COALESCE(approved_at, now()) ELSE approved_at END,
+            activated_at = CASE WHEN $2 = 'active' THEN COALESCE(activated_at, now()) ELSE activated_at END,
+            discussion_started_at = CASE WHEN $2 = 'under_discussion' THEN COALESCE(discussion_started_at, now()) ELSE discussion_started_at END,
+            paused_at = CASE WHEN $2 = 'paused' THEN COALESCE(paused_at, now()) ELSE paused_at END,
+            retired_at = CASE WHEN $2 = 'retired' THEN COALESCE(retired_at, now()) ELSE retired_at END,
+            reason = CASE WHEN $2 IN ('paused', 'retired') THEN $4 ELSE reason END,
             updated_at = now()
-        WHERE id = $1 AND status = $3
-        RETURNING id, name, description, status, parameters, created_at, updated_at, approved_at, activated_at
+        WHERE id = $1 AND status = ANY($3::text[])
+        RETURNING ${STRATEGY_RETURNING_COLUMNS}
       `,
-      [id.trim(), nextStatus, requiredStatus]
+      [id.trim(), nextStatus, requiredStatuses, normalizeStrategyReason(reason)]
     );
 
     if (result.rows[0]) {
@@ -220,6 +393,10 @@ export class PostgresStrategyStore implements StrategyStore, StrategyTradingGate
 
     throw new StrategyLifecycleError(`cannot transition strategy ${id} from ${current.status} to ${nextStatus}`);
   }
+}
+
+export async function ensureStrategiesSchema(pool: Pool): Promise<void> {
+  await pool.query(await readFile(new URL("../db/bootstrap/002_strategies.sql", import.meta.url), "utf8"));
 }
 
 export function buildStrategyQuantPlaybook(strategy: StrategyRecord, input: StrategyPlaybookInput): QuantPlaybook {
@@ -252,12 +429,8 @@ export async function getStrategyTradingGateViolation(
   return null;
 }
 
-function assertValidTransition(currentStatus: StrategyStatus, nextStatus: StrategyStatus): void {
-  if (nextStatus === "approved" && currentStatus === "draft") {
-    return;
-  }
-
-  if (nextStatus === "active" && currentStatus === "approved") {
+export function assertValidTransition(currentStatus: StrategyStatus, nextStatus: StrategyStatus): void {
+  if (ALLOWED_STRATEGY_TRANSITIONS[currentStatus].includes(nextStatus)) {
     return;
   }
 
@@ -290,6 +463,37 @@ function validateStrategyParameters(parameters: QuantPlaybookParameters): void {
   }
 }
 
+function assertCanUpdateStrategy(strategy: StrategyRecord): void {
+  if (STRATEGY_MUTABLE_STATUSES.includes(strategy.status)) {
+    return;
+  }
+
+  throw new StrategyLifecycleError(`cannot update strategy ${strategy.id} while ${strategy.status}`);
+}
+
+function normalizeStrategiesLimit(limit: number): number {
+  if (!Number.isFinite(limit)) {
+    return 50;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), 100);
+}
+
+function normalizeStrategyReason(reason: string | undefined): string | null {
+  const trimmedReason = reason?.trim();
+  return trimmedReason ? trimmedReason : null;
+}
+
+function setStrategyReason(strategy: StrategyRecord, reason: string | undefined): void {
+  const normalizedReason = normalizeStrategyReason(reason);
+
+  if (normalizedReason === null) {
+    delete strategy.reason;
+  } else {
+    strategy.reason = normalizedReason;
+  }
+}
+
 function cloneStrategy(strategy: StrategyRecord): StrategyRecord {
   return {
     ...strategy,
@@ -297,7 +501,20 @@ function cloneStrategy(strategy: StrategyRecord): StrategyRecord {
   };
 }
 
-type StrategyRow = {
+const ALLOWED_STRATEGY_TRANSITIONS: Record<StrategyStatus, StrategyStatus[]> = {
+  draft: ["under_discussion", "approved"],
+  under_discussion: ["approved", "draft"],
+  approved: ["active"],
+  active: ["paused", "retired"],
+  paused: ["active", "retired"],
+  retired: []
+};
+
+const STRATEGY_MUTABLE_STATUSES: StrategyStatus[] = ["draft", "under_discussion"];
+
+const STRATEGY_RETURNING_COLUMNS = "id, name, description, status, parameters, created_at, updated_at, approved_at, activated_at, discussion_started_at, paused_at, retired_at, reason";
+
+export type StrategyRow = {
   id: string;
   name: string;
   description: string | null;
@@ -307,6 +524,10 @@ type StrategyRow = {
   updated_at: Date | string;
   approved_at: Date | string | null;
   activated_at: Date | string | null;
+  discussion_started_at: Date | string | null;
+  paused_at: Date | string | null;
+  retired_at: Date | string | null;
+  reason: string | null;
 };
 
 function rowToStrategy(row: StrategyRow | undefined): StrategyRecord {
@@ -326,7 +547,7 @@ function rowToStrategy(row: StrategyRow | undefined): StrategyRecord {
     updatedAt: toIsoString(row.updated_at)
   };
 
-  if (row.description) {
+  if (row.description !== null) {
     strategy.description = row.description;
   }
 
@@ -336,6 +557,22 @@ function rowToStrategy(row: StrategyRow | undefined): StrategyRecord {
 
   if (row.activated_at) {
     strategy.activatedAt = toIsoString(row.activated_at);
+  }
+
+  if (row.discussion_started_at) {
+    strategy.discussionStartedAt = toIsoString(row.discussion_started_at);
+  }
+
+  if (row.paused_at) {
+    strategy.pausedAt = toIsoString(row.paused_at);
+  }
+
+  if (row.retired_at) {
+    strategy.retiredAt = toIsoString(row.retired_at);
+  }
+
+  if (row.reason !== null) {
+    strategy.reason = row.reason;
   }
 
   return strategy;

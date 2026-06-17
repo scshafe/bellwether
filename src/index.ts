@@ -11,6 +11,7 @@ import { ensureQualitativeItemsSchema, ensureSourcesSchema } from "./qualitative
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
+import { ensureStrategiesSchema } from "./strategy.js";
 
 const endpoints = readServerEndpointsConfig();
 const { databaseUrl } = readDatabaseUrlConfig();
@@ -18,6 +19,7 @@ const pool = createPool(databaseUrl);
 
 await ensureAgentDecisionLogSchema(pool);
 await ensureAgentRuntimeControlSchema(pool);
+await ensureStrategiesSchema(pool);
 await ensureSourcesSchema(pool);
 await ensureQualitativeItemsSchema(pool);
 

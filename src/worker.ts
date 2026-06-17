@@ -26,6 +26,7 @@ import {
   type ClaimedRuntimeJob
 } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
+import { ensureStrategiesSchema } from "./strategy.js";
 
 const WORKER_LOCK_ID = 420_001;
 const workerPlacement = createAgentRuntime().describeWorkerPlacement();
@@ -50,6 +51,7 @@ export async function runWorker(): Promise<void> {
   try {
     await pool.query("SELECT 1");
     await ensureAgentRuntimeControlSchema(pool);
+    await ensureStrategiesSchema(pool);
     await ensureSourcesSchema(pool);
     await ensureQualitativeItemsSchema(pool);
     await ensureAlpacaNewsSource(pool);
