@@ -43,6 +43,8 @@ import {
   type LlmJsonRequest,
   type ReasoningModel
 } from "./llm.js";
+import { PostgresQualitativeItemsStore, type QualitativeItemsStore } from "./qualitative.js";
+import { emptyQualitativeEvidence, QualitativeBriefService } from "./qualitative-brief.js";
 
 const liveCycleUniverse: UniverseAsset[] = [{ symbol: "AAPL", sector: "technology" }];
 const liveCycleStrategyId = "55555555-5555-5555-5555-555555555555";
@@ -64,6 +66,7 @@ export type RunLiveTradeCycleOptions = {
   brokerCredentialFile?: string;
   oauthCredentialFile?: string;
   fetchFn?: typeof fetch;
+  qualitativeItemsStore?: QualitativeItemsStore;
 };
 
 export type LiveTradeCycleResult = AgentTeamTradeCycleResult & {
@@ -125,6 +128,15 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
       new SecretsBackedLlmCredentialVault(await createOpenAiOAuthSecretsStore({ filePath: options.oauthCredentialFile })),
       { providerId: OPENAI_OAUTH_PROVIDER_ID, fetchFn: options.fetchFn }
     ));
+    const qualitativeItemsStore = options.qualitativeItemsStore ?? (pool ? new PostgresQualitativeItemsStore(pool) : null);
+    const qualitativeBrief = qualitativeItemsStore
+      ? await new QualitativeBriefService().buildBrief({
+        strategy,
+        tickers: [...universe.map((asset) => asset.symbol), ...playbook.candidates.map((candidate) => candidate.symbol)],
+        itemsStore: qualitativeItemsStore,
+        model
+      })
+      : emptyQualitativeEvidence();
 
     const decisionLogStore = options.decisionLogStore ?? new PostgresAgentDecisionLogStore(requiredPool(pool));
     const result = await runMinimalAgentTeamTrade({
@@ -134,7 +146,8 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
       broker,
       model,
       decisionLogStore,
-      cycleId
+      cycleId,
+      qualitativeBrief
     });
 
     return {
@@ -174,6 +187,10 @@ function liveCycleSchemaHint(request: LlmJsonRequest): string {
 
   if (request.schemaName === "execution_agent_decision") {
     return "Schema: return exactly {\"decision\": \"place\" | \"skip\", \"rationale\": string}. Keep decision and rationale as top-level keys.";
+  }
+
+  if (request.schemaName === "qualitative_brief") {
+    return "Schema: return exactly {\"links\":[{\"href\": string, \"title\": string, \"source\"?: string}], \"quotes\":[{\"quote\": string, \"source\": string, \"href\"?: string}], \"signals\":[{\"label\": string, \"value\": string, \"source\"?: string}]}. Quotes must be copied from supplied excerpts only.";
   }
 
   return "Return only a single JSON object with the exact top-level fields required by the named schema.";

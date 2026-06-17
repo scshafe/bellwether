@@ -9,3 +9,6 @@ CREATE TABLE IF NOT EXISTS agent_decision_logs (
   risk jsonb NOT NULL,
   execution jsonb NOT NULL
 );
+
+ALTER TABLE agent_decision_logs
+  ADD COLUMN IF NOT EXISTS qualitative_evidence jsonb;

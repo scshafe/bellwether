@@ -53,6 +53,12 @@ export type ExecutionAgentDecision = {
   brokerRejection?: string;
 };
 
+export type PortalQualitativeEvidence = {
+  links: Array<{ href: string; title: string; source?: string }>;
+  quotes: Array<{ quote: string; source: string; href?: string }>;
+  signals: Array<{ label: string; value: string; source?: string }>;
+};
+
 export type AgentDecisionLogInput = {
   id?: string;
   cycleId?: string;
@@ -66,6 +72,7 @@ export type AgentDecisionLogInput = {
   strategyAnalyst: StrategyAnalystDecision;
   risk: RiskAgentDecision;
   execution: ExecutionAgentDecision;
+  qualitativeEvidence?: PortalQualitativeEvidence;
 };
 
 export type AgentDecisionLogEntry = Required<Pick<AgentDecisionLogInput, "id" | "cycleId" | "strategyId" | "createdAt">> &
@@ -108,10 +115,10 @@ export class PostgresAgentDecisionLogStore implements AgentDecisionLogStore {
       `
         INSERT INTO agent_decision_logs (
           id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot,
-          strategy_analyst, risk, execution
+          strategy_analyst, risk, execution, qualitative_evidence
         )
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
-        RETURNING id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
+        RETURNING id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution, qualitative_evidence
       `,
       [
         normalized.id,
@@ -122,7 +129,8 @@ export class PostgresAgentDecisionLogStore implements AgentDecisionLogStore {
         JSON.stringify(normalized.brokerSnapshot),
         JSON.stringify(normalized.strategyAnalyst),
         JSON.stringify(normalized.risk),
-        JSON.stringify(normalized.execution)
+        JSON.stringify(normalized.execution),
+        normalized.qualitativeEvidence ? JSON.stringify(normalized.qualitativeEvidence) : null
       ]
     );
 
@@ -132,7 +140,7 @@ export class PostgresAgentDecisionLogStore implements AgentDecisionLogStore {
   async getDecision(id: string): Promise<AgentDecisionLogEntry | null> {
     const result = await this.pool.query<AgentDecisionLogRow>(
       `
-        SELECT id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution
+        SELECT id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution, qualitative_evidence
         FROM agent_decision_logs
         WHERE id = $1
       `,
@@ -145,7 +153,7 @@ export class PostgresAgentDecisionLogStore implements AgentDecisionLogStore {
   async listDecisions(limit = 50): Promise<AgentDecisionLogEntry[]> {
     const result = await this.pool.query<AgentDecisionLogRow>(
       `
-        SELECT id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution
+        SELECT id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution, qualitative_evidence
         FROM agent_decision_logs
         ORDER BY created_at DESC
         LIMIT $1
@@ -169,6 +177,7 @@ export class StrategyAnalystAgent {
     playbook: QuantPlaybook;
     portfolio: PortfolioSnapshot;
     brokerSnapshot: { account: BrokerAccount; positions: BrokerPosition[] };
+    qualitativeBrief?: PortalQualitativeEvidence;
   }): Promise<{ quantSignal: QuantSignalDecisionSnapshot; decision: StrategyAnalystDecision }> {
     const candidate = input.playbook.candidates[0];
 
@@ -179,12 +188,13 @@ export class StrategyAnalystAgent {
     const response = await this.model.generateJson({
       schemaName: "strategy_analyst_decision",
       systemPrompt:
-        "You are the Strategy/Analyst agent. Return JSON only. Form a concise thesis and one proposed buy limit order from the supplied deterministic quant candidate. Do not mention broker endpoint class or account mode.",
+        "You are the Strategy/Analyst agent. Return JSON only. Form a concise thesis and one proposed buy limit order from the supplied deterministic quant candidate. Treat any qualitative brief as read-only context for the thesis only; do not use it to change the candidate symbol, quantity, or deterministic rails. Do not mention broker endpoint class or account mode.",
       userPrompt: JSON.stringify({
         strategy: strategyPromptShape(input.strategy),
         quantCandidate: candidate,
         portfolio: input.portfolio,
-        brokerPositions: input.brokerSnapshot.positions
+        brokerPositions: input.brokerSnapshot.positions,
+        qualitativeBrief: input.qualitativeBrief
       })
     });
     const parsed = strategyAnalystResponse(response);
@@ -298,6 +308,7 @@ export type RunMinimalAgentTeamTradeInput = {
   model: ReasoningModel;
   decisionLogStore: AgentDecisionLogStore;
   cycleId?: string;
+  qualitativeBrief?: PortalQualitativeEvidence;
 };
 
 export type AgentTeamTradeCycleResult = {
@@ -322,7 +333,8 @@ export async function runMinimalAgentTeamTrade(input: RunMinimalAgentTeamTradeIn
     strategy: input.strategy,
     playbook: input.playbook,
     portfolio: input.portfolio,
-    brokerSnapshot
+    brokerSnapshot,
+    qualitativeBrief: input.qualitativeBrief
   });
   const riskDecision = await risk.evaluate({
     strategy: input.strategy,
@@ -342,7 +354,8 @@ export async function runMinimalAgentTeamTrade(input: RunMinimalAgentTeamTradeIn
     brokerSnapshot,
     strategyAnalyst: analystOutput.decision,
     risk: riskDecision,
-    execution: executionDecision
+    execution: executionDecision,
+    qualitativeEvidence: input.qualitativeBrief
   });
 
   return {
@@ -365,7 +378,8 @@ function normalizeDecisionLogInput(entry: AgentDecisionLogInput): AgentDecisionL
     brokerSnapshot: cloneJson(entry.brokerSnapshot),
     strategyAnalyst: cloneJson(entry.strategyAnalyst),
     risk: cloneJson(entry.risk),
-    execution: cloneJson(entry.execution)
+    execution: cloneJson(entry.execution),
+    ...(entry.qualitativeEvidence ? { qualitativeEvidence: cloneJson(entry.qualitativeEvidence) } : {})
   };
 }
 
@@ -504,6 +518,7 @@ type AgentDecisionLogRow = {
   strategy_analyst: StrategyAnalystDecision;
   risk: RiskAgentDecision;
   execution: ExecutionAgentDecision;
+  qualitative_evidence?: PortalQualitativeEvidence | null;
 };
 
 function rowToDecisionLogEntry(row: AgentDecisionLogRow | undefined): AgentDecisionLogEntry {
@@ -520,7 +535,8 @@ function rowToDecisionLogEntry(row: AgentDecisionLogRow | undefined): AgentDecis
     brokerSnapshot: cloneJson(row.broker_snapshot),
     strategyAnalyst: cloneJson(row.strategy_analyst),
     risk: cloneJson(row.risk),
-    execution: cloneJson(row.execution)
+    execution: cloneJson(row.execution),
+    ...(row.qualitative_evidence ? { qualitativeEvidence: cloneJson(row.qualitative_evidence) } : {})
   };
 }
 

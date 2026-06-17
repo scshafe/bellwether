@@ -16,6 +16,7 @@ import { InMemoryAgentDecisionLogStore } from "./agent-team.js";
 import { LLM_OAUTH_CREDENTIAL_FILE, type LlmJsonRequest, type ReasoningModel } from "./llm.js";
 import { type GetDailyBarsOptions, type MarketDataClient } from "./market-data.js";
 import { type PriceVolumeBar } from "./quant-playbook.js";
+import { InMemoryQualitativeItemsStore } from "./qualitative.js";
 import { runLiveTradeCycle } from "./live-cycle.js";
 
 class QueueReasoningModel implements ReasoningModel {
@@ -111,7 +112,29 @@ describe("live trade cycle composition root", () => {
   it("wires market data, strategy, agents, broker, and decision log into one cycle", async () => {
     const marketData = new StaticMarketDataClient(bars("AAPL", [100, 102, 104, 106, 108, 110], 20_000));
     const broker = new RecordingBrokerAdapter();
+    const qualitativeItemsStore = new InMemoryQualitativeItemsStore();
+    await qualitativeItemsStore.upsertItem({
+      sourceId: "22222222-2222-4222-8222-222222222222",
+      sourceItemId: "aapl-brief-1",
+      link: "https://news.example.test/aapl",
+      title: "AAPL momentum note",
+      excerpt: "Curated Feed reports AAPL momentum improved after the open.",
+      publishedAt: "2026-06-17T13:00:00.000Z",
+      tickers: ["AAPL"],
+      metadata: { sourceKey: "curated-feed", qualityRating: 5 }
+    });
     const model = new QueueReasoningModel([
+      {
+        links: [{ href: "https://news.example.test/aapl", title: "AAPL momentum note", source: "curated-feed" }],
+        quotes: [
+          {
+            quote: "AAPL momentum improved after the open.",
+            source: "curated-feed",
+            href: "https://news.example.test/aapl"
+          }
+        ],
+        signals: [{ label: "News tone", value: "Momentum read is constructive", source: "curated-feed" }]
+      },
       { thesis: "AAPL is the top deterministic live-cycle candidate.", symbol: "AAPL", qty: 1, limitPrice: 110 },
       { verdict: "approved", rationale: "One share is inside the active strategy rails." },
       { decision: "place", rationale: "Place the active-strategy order through the adapter." }
@@ -124,7 +147,8 @@ describe("live trade cycle composition root", () => {
       marketDataClient: marketData,
       broker,
       model,
-      decisionLogStore
+      decisionLogStore,
+      qualitativeItemsStore
     });
 
     assert.equal(result.execution.decision, "placed");
@@ -137,7 +161,22 @@ describe("live trade cycle composition root", () => {
     assert.equal(broker.orders[0]?.qty, 1);
     assert.deepEqual(marketData.calls[0]?.symbols, ["AAPL"]);
     assert.deepEqual(await decisionLogStore.getDecision(result.decisionLog.id), result.decisionLog);
-    assert.equal(model.requests.length, 3);
+    assert.deepEqual(result.decisionLog.qualitativeEvidence, {
+      links: [{ href: "https://news.example.test/aapl", title: "AAPL momentum note", source: "curated-feed" }],
+      quotes: [
+        {
+          quote: "AAPL momentum improved after the open.",
+          source: "curated-feed",
+          href: "https://news.example.test/aapl"
+        }
+      ],
+      signals: [{ label: "News tone", value: "Momentum read is constructive", source: "curated-feed" }]
+    });
+    assert.equal(model.requests.length, 4);
+    assert.equal(model.requests[0]?.schemaName, "qualitative_brief");
+    assert.equal(model.requests[1]?.schemaName, "strategy_analyst_decision");
+    assert.match(model.requests[1]?.userPrompt ?? "", /qualitativeBrief/u);
+    assert.match(model.requests[1]?.userPrompt ?? "", /AAPL momentum improved/u);
     assert.equal(JSON.stringify(model.requests).includes("paper"), false);
   });
 });

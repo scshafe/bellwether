@@ -310,7 +310,12 @@ describe("Postgres agent decision log store", () => {
         }
       },
       risk: { approved: true, verdict: "approved" as const, rationale: "Persisted risk", deterministicViolations: [] as string[] },
-      execution: { decision: "skipped" as const, rationale: "Persisted execution" }
+      execution: { decision: "skipped" as const, rationale: "Persisted execution" },
+      qualitative_evidence: {
+        links: [{ href: "https://news.example.test/aapl", title: "AAPL update", source: "curated-feed" }],
+        quotes: [{ quote: "AAPL update excerpt.", source: "curated-feed", href: "https://news.example.test/aapl" }],
+        signals: [{ label: "Tone", value: "Constructive", source: "curated-feed" }]
+      }
     };
     const pool = {
       query: async (text: string, values?: unknown[]) => {
@@ -321,6 +326,10 @@ describe("Postgres agent decision log store", () => {
         }
 
         if (text.includes("ORDER BY created_at DESC")) {
+          return { rows: [row] };
+        }
+
+        if (text.includes("WHERE id = $1")) {
           return { rows: [row] };
         }
 
@@ -339,18 +348,27 @@ describe("Postgres agent decision log store", () => {
       brokerSnapshot: row.broker_snapshot,
       strategyAnalyst: row.strategy_analyst,
       risk: row.risk,
-      execution: row.execution
+      execution: row.execution,
+      qualitativeEvidence: row.qualitative_evidence
     });
     const listed = await store.listDecisions(1);
+    const fetched = await store.getDecision(row.id);
 
     assert.match(queries[0]?.text ?? "", /CREATE TABLE IF NOT EXISTS agent_decision_logs/u);
     assert.match(queries[0]?.text ?? "", /cycle_id text NOT NULL UNIQUE/u);
+    assert.match(queries[0]?.text ?? "", /ADD COLUMN IF NOT EXISTS qualitative_evidence jsonb/u);
     assert.match(queries[1]?.text ?? "", /INSERT INTO agent_decision_logs/u);
+    assert.match(queries[1]?.text ?? "", /qualitative_evidence/u);
     assert.equal(queries[1]?.values?.[0], row.id);
+    assert.equal(queries[1]?.values?.[9], JSON.stringify(row.qualitative_evidence));
     assert.match(queries[2]?.text ?? "", /ORDER BY created_at DESC/u);
+    assert.match(queries[2]?.text ?? "", /qualitative_evidence/u);
     assert.deepEqual(queries[2]?.values, [1]);
+    assert.match(queries[3]?.text ?? "", /WHERE id = \$1/u);
     assert.equal(recorded.id, row.id);
     assert.equal(listed[0]?.id, row.id);
+    assert.equal(fetched?.id, row.id);
     assert.equal(listed[0]?.strategyAnalyst.thesis, "Persisted thesis");
+    assert.deepEqual(listed[0]?.qualitativeEvidence, row.qualitative_evidence);
   });
 });
