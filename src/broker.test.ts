@@ -12,6 +12,7 @@ import {
 } from "./broker.js";
 import { type OrderGuardRails } from "./order-rails.js";
 import { InMemorySecretsStore, SecretsBackedBrokerCredentialVault } from "./secrets.js";
+import { type StrategyStatus, type StrategyTradingGate } from "./strategy.js";
 
 type FetchCall = {
   url: string;
@@ -304,6 +305,91 @@ describe("AlpacaPaperAdapter", () => {
       /outside the playbook universe/u
     );
     assert.equal(fetchCalls, 0);
+  });
+
+  it("requires an active strategy before placing attributed orders", async () => {
+    const statuses: Record<string, StrategyStatus> = {
+      "draft-strategy": "draft",
+      "active-strategy": "active"
+    };
+    const strategyGate: StrategyTradingGate = {
+      getStrategyStatus: async (strategyId) => statuses[strategyId] ?? null
+    };
+    const calls: FetchCall[] = [];
+    const adapter = new AlpacaPaperAdapter(testVault(), "alpaca-paper", {
+      strategyGate,
+      fetchFn: async (url, init) => {
+        calls.push({ url: url.toString(), init: init ?? {} });
+        return responseJson({
+          id: "order-1",
+          symbol: "AAPL",
+          qty: "1",
+          side: "buy",
+          type: "limit",
+          time_in_force: "day",
+          status: "accepted"
+        });
+      }
+    });
+
+    await assert.rejects(
+      () =>
+        adapter.placeOrder({
+          symbol: "AAPL",
+          qty: 1,
+          side: "buy",
+          type: "limit",
+          limitPrice: 100,
+          timeInForce: "day"
+        }),
+      /strategyId is required/u
+    );
+    await assert.rejects(
+      () =>
+        adapter.placeOrder({
+          strategyId: "draft-strategy",
+          symbol: "AAPL",
+          qty: 1,
+          side: "buy",
+          type: "limit",
+          limitPrice: 100,
+          timeInForce: "day"
+        }),
+      /only active strategies can trade/u
+    );
+    await assert.rejects(
+      () =>
+        adapter.placeOrder({
+          strategyId: "missing-strategy",
+          symbol: "AAPL",
+          qty: 1,
+          side: "buy",
+          type: "limit",
+          limitPrice: 100,
+          timeInForce: "day"
+        }),
+      /was not found/u
+    );
+
+    await adapter.placeOrder({
+      strategyId: "active-strategy",
+      symbol: "AAPL",
+      qty: 1,
+      side: "buy",
+      type: "limit",
+      limitPrice: 100,
+      timeInForce: "day"
+    });
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(JSON.parse(calls[0]?.init.body as string), {
+      symbol: "AAPL",
+      qty: "1",
+      side: "buy",
+      type: "limit",
+      time_in_force: "day",
+      limit_price: "100"
+    });
   });
 
   it("loads mounted Alpaca credentials into the broker credential vault prefix", async () => {

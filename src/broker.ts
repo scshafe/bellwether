@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { requireConfigValue } from "./config.js";
 import { getOrderGuardRailViolations, type OrderGuardRails } from "./order-rails.js";
 import { InMemorySecretsStore, type BrokerCredentialVault, type SecretsStore } from "./secrets.js";
+import { getStrategyTradingGateViolation, type StrategyTradingGate } from "./strategy.js";
 
 export const ALPACA_PAPER_BROKER_ACCOUNT_ID = "alpaca-paper";
 export const ALPACA_PAPER_CREDENTIAL_FILE = "/srv/bellwether/alpaca-paper.env";
@@ -37,6 +38,7 @@ export type BrokerOrderRequest = {
   side: BrokerOrderSide;
   type: BrokerOrderType;
   timeInForce: BrokerTimeInForce;
+  strategyId?: string;
   limitPrice?: number;
   estimatedNotional?: number;
   clientOrderId?: string;
@@ -80,6 +82,7 @@ export type AlpacaPaperAdapterOptions = {
   fetchFn?: typeof fetch;
   maxEstimatedNotional?: number;
   orderGuardRails?: OrderGuardRails | (() => OrderGuardRails | Promise<OrderGuardRails>);
+  strategyGate?: StrategyTradingGate;
 };
 
 export class BrokerOrderRejectedError extends Error {
@@ -93,6 +96,7 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
   private readonly fetchFn: typeof fetch;
   private readonly maxEstimatedNotional: number;
   private readonly orderGuardRails?: OrderGuardRails | (() => OrderGuardRails | Promise<OrderGuardRails>);
+  private readonly strategyGate?: StrategyTradingGate;
 
   constructor(
     private readonly credentialVault: BrokerCredentialVault,
@@ -102,6 +106,7 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
     this.fetchFn = options.fetchFn ?? fetch;
     this.maxEstimatedNotional = options.maxEstimatedNotional ?? defaultMaxEstimatedNotional;
     this.orderGuardRails = options.orderGuardRails;
+    this.strategyGate = options.strategyGate;
   }
 
   async getAccount(): Promise<BrokerAccount> {
@@ -139,6 +144,7 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
 
   async placeOrder(order: BrokerOrderRequest): Promise<BrokerOrder> {
     validateOrder(order, this.maxEstimatedNotional);
+    await this.validateStrategyGate(order);
     await this.validateOrderGuardRails(order);
 
     const body = await this.request("/v2/orders", {
@@ -228,6 +234,18 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
 
     if (violations.length > 0) {
       throw new BrokerOrderRejectedError(`order violates quant guard rails: ${violations.join("; ")}`);
+    }
+  }
+
+  private async validateStrategyGate(order: BrokerOrderRequest): Promise<void> {
+    if (!this.strategyGate) {
+      return;
+    }
+
+    const violation = await getStrategyTradingGateViolation(this.strategyGate, order.strategyId ?? "");
+
+    if (violation) {
+      throw new BrokerOrderRejectedError(violation);
     }
   }
 }
