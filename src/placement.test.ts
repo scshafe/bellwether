@@ -5,6 +5,7 @@ import {
   createAgentRuntime,
   createComposeControlPlane,
   InMemoryBlobStore,
+  readPacedCadenceConfig,
   readDatabaseUrlConfig,
   readServerEndpointsConfig,
   readWorkerPlacement
@@ -50,6 +51,32 @@ describe("placement config", () => {
       () => readWorkerPlacement({ QUALITATIVE_INGEST_POLL_INTERVAL_MS: "0" }),
       /QUALITATIVE_INGEST_POLL_INTERVAL_MS must be a positive integer/
     );
+    assert.throws(
+      () => readPacedCadenceConfig({ PACED_CYCLE_INTERVAL_MS: "0" }),
+      /PACED_CYCLE_INTERVAL_MS must be a positive integer/
+    );
+    assert.throws(
+      () => readPacedCadenceConfig({ PACED_MARKET_HOURS_AWARE: "maybe" }),
+      /PACED_MARKET_HOURS_AWARE must be a boolean value/
+    );
+  });
+
+  it("reads paced cadence defaults and overrides", () => {
+    assert.deepEqual(readPacedCadenceConfig({}), {
+      cycleIntervalMs: 300000,
+      marketHoursAware: true
+    });
+
+    assert.deepEqual(
+      readPacedCadenceConfig({
+        PACED_CYCLE_INTERVAL_MS: "120000",
+        PACED_MARKET_HOURS_AWARE: "false"
+      }),
+      {
+        cycleIntervalMs: 120000,
+        marketHoursAware: false
+      }
+    );
   });
 });
 
@@ -71,6 +98,10 @@ describe("AgentRuntime placement", () => {
       databaseServiceName: "db",
       pollIntervalMs: 2500,
       qualitativeIngestPollIntervalMs: 60000,
+      pacedCadence: {
+        cycleIntervalMs: 300000,
+        marketHoursAware: true
+      },
       readyFile: "/tmp/worker-ready"
     });
   });

@@ -18,8 +18,17 @@ export type WorkerPlacement = {
   databaseServiceName: string;
   pollIntervalMs: number;
   qualitativeIngestPollIntervalMs: number;
+  pacedCadence: PacedCadenceConfig;
   readyFile: string;
 };
+
+export type PacedCadenceConfig = {
+  cycleIntervalMs: number;
+  marketHoursAware: boolean;
+};
+
+export const DEFAULT_PACED_CYCLE_INTERVAL_MS = 300_000;
+export const DEFAULT_PACED_MARKET_HOURS_AWARE = true;
 
 export interface AgentRuntime {
   describeWorkerPlacement(): WorkerPlacement;
@@ -119,7 +128,22 @@ export function readWorkerPlacement(config: NodeJS.ProcessEnv = process.env): Wo
       config.QUALITATIVE_INGEST_POLL_INTERVAL_MS ?? "300000",
       "QUALITATIVE_INGEST_POLL_INTERVAL_MS"
     ),
+    pacedCadence: readPacedCadenceConfig(config),
     readyFile: config.WORKER_READY_FILE ?? "/tmp/worker-ready"
+  };
+}
+
+export function readPacedCadenceConfig(config: NodeJS.ProcessEnv = process.env): PacedCadenceConfig {
+  return {
+    cycleIntervalMs: parsePositiveInteger(
+      config.PACED_CYCLE_INTERVAL_MS ?? DEFAULT_PACED_CYCLE_INTERVAL_MS.toString(),
+      "PACED_CYCLE_INTERVAL_MS"
+    ),
+    marketHoursAware: parseBooleanConfig(
+      config.PACED_MARKET_HOURS_AWARE,
+      "PACED_MARKET_HOURS_AWARE",
+      DEFAULT_PACED_MARKET_HOURS_AWARE
+    )
   };
 }
 
@@ -160,6 +184,24 @@ function parsePositiveInteger(value: string, name: string): number {
   }
 
   return parsed;
+}
+
+function parseBooleanConfig(value: string | undefined, name: string, defaultValue: boolean): boolean {
+  if (value === undefined || value.trim() === "") {
+    return defaultValue;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`${name} must be a boolean value`);
 }
 
 function copyBlob(blob: BlobWrite): BlobObject {

@@ -12,3 +12,8 @@ co-developed strategies, a family portal. Conception: see the Mission Control pl
 - `worker`: Postgres-coordinated agent worker process; no message broker.
 - `db`: Postgres placement for coordination and persistence in the trial compose stack.
 - `placement`: swappable seams for server endpoints, database URL, agent runtime placement, blob storage, and orchestration facade.
+
+## Paced Cadence Defaults
+
+- `PACED_CYCLE_INTERVAL_MS` controls the interval between paced trading cycles; default `300000` (5 minutes).
+- `PACED_MARKET_HOURS_AWARE` controls whether paced cycles should honor the market-hours clock; default `true`.
