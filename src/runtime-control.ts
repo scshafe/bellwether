@@ -153,45 +153,79 @@ export async function recordLiveCycleSuccess(
   pool: Pool,
   jobId: string,
   decisionLogId: string,
-  summary: string
+  summary: string,
+  options: { rearmDelayMs: number } = { rearmDelayMs: 0 }
 ): Promise<void> {
-  await withTransaction(pool, async (client) => {
-    await client.query("UPDATE agent_jobs SET status = 'done', updated_at = now() WHERE id = $1", [jobId]);
-    await client.query(
-      `
-        UPDATE agent_runtime_status
-        SET enabled = false,
-            active_job_id = null,
-            last_cycle_job_id = $1,
-            last_cycle_status = 'succeeded',
-            last_cycle_summary = $2,
-            last_cycle_decision_log_id = $3,
-            last_cycle_completed_at = now(),
-            updated_at = now()
-        WHERE id = true
-      `,
-      [jobId, summary, decisionLogId]
-    );
+  await recordLiveCycleCompletion(pool, {
+    jobId,
+    jobStatus: "done",
+    lastCycleStatus: "succeeded",
+    summary,
+    decisionLogId,
+    rearmDelayMs: options.rearmDelayMs
   });
 }
 
-export async function recordLiveCycleFailure(pool: Pool, jobId: string, summary: string): Promise<void> {
+export async function recordLiveCycleFailure(
+  pool: Pool,
+  jobId: string,
+  summary: string,
+  options: { rearmDelayMs: number } = { rearmDelayMs: 0 }
+): Promise<void> {
+  await recordLiveCycleCompletion(pool, {
+    jobId,
+    jobStatus: "failed",
+    lastCycleStatus: "failed",
+    summary,
+    decisionLogId: null,
+    rearmDelayMs: options.rearmDelayMs
+  });
+}
+
+type LiveCycleCompletion = {
+  jobId: string;
+  jobStatus: "done" | "failed";
+  lastCycleStatus: "succeeded" | "failed";
+  summary: string;
+  decisionLogId: string | null;
+  rearmDelayMs: number;
+};
+
+async function recordLiveCycleCompletion(pool: Pool, completion: LiveCycleCompletion): Promise<void> {
+  if (!Number.isFinite(completion.rearmDelayMs) || completion.rearmDelayMs < 0) {
+    throw new Error("rearmDelayMs must be a non-negative number");
+  }
+
   await withTransaction(pool, async (client) => {
-    await client.query("UPDATE agent_jobs SET status = 'failed', updated_at = now() WHERE id = $1", [jobId]);
+    await client.query("UPDATE agent_jobs SET status = $2, updated_at = now() WHERE id = $1", [completion.jobId, completion.jobStatus]);
+    const status = await lockRuntimeStatus(client);
+    let nextJobId: string | null = null;
+
+    if (status.enabled && status.active_job_id === completion.jobId) {
+      const nextJob = await client.query<{ id: string }>(
+        `
+          INSERT INTO agent_jobs (kind, payload, status, run_after)
+          VALUES ('live_trade_cycle', '{}'::jsonb, 'queued', now() + ($1::double precision * interval '1 millisecond'))
+          RETURNING id
+        `,
+        [completion.rearmDelayMs]
+      );
+      nextJobId = nextJob.rows[0]?.id ?? null;
+    }
+
     await client.query(
       `
         UPDATE agent_runtime_status
-        SET enabled = false,
-            active_job_id = null,
+        SET active_job_id = CASE WHEN enabled = true AND active_job_id = $1::uuid THEN $5::uuid ELSE active_job_id END,
             last_cycle_job_id = $1,
-            last_cycle_status = 'failed',
-            last_cycle_summary = $2,
-            last_cycle_decision_log_id = null,
+            last_cycle_status = $2,
+            last_cycle_summary = $3,
+            last_cycle_decision_log_id = $4,
             last_cycle_completed_at = now(),
             updated_at = now()
         WHERE id = true
       `,
-      [jobId, summary]
+      [completion.jobId, completion.lastCycleStatus, completion.summary, completion.decisionLogId, nextJobId]
     );
   });
 }
@@ -240,7 +274,7 @@ function requiredStatusRow(row: AgentRuntimeStatusRow | undefined): AgentRuntime
 
 function rowToRuntimeStatus(row: AgentRuntimeStatusRow): AgentRuntimeStatus {
   return {
-    state: row.enabled && row.active_job_id ? "running" : "stopped",
+    state: row.enabled ? "running" : "stopped",
     activeJobId: row.enabled ? row.active_job_id : null,
     lastCycle: row.last_cycle_status
       ? {

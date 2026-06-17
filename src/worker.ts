@@ -10,6 +10,8 @@ import { createAlpacaPaperSecretsStore } from "./broker.js";
 import { isFeatureEnabled } from "./config.js";
 import { createPool } from "./db.js";
 import { runLiveTradeCycle } from "./live-cycle.js";
+import { createAlpacaMarketClock } from "./market-clock.js";
+import { runPacedCycleScheduler } from "./paced-cycle-scheduler.js";
 import { createAgentRuntime } from "./placement.js";
 import {
   ensureAlpacaNewsSource,
@@ -24,6 +26,7 @@ import {
 import {
   claimEnabledLiveCycleJob,
   ensureAgentRuntimeControlSchema,
+  PostgresAgentRuntimeControl,
   recordLiveCycleFailure,
   recordLiveCycleSuccess,
   type ClaimedRuntimeJob
@@ -70,10 +73,12 @@ export async function runWorker(): Promise<void> {
       signal: qualitativePollerController.signal,
       logger: console
     });
+    const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
+    const marketClock = createAlpacaMarketClock(brokerCredentialVault);
+    const runtimeControl = new PostgresAgentRuntimeControl(pool);
     try {
-      const credentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
       alpacaNewsStream = runAlpacaNewsIngestStream({
-        credentialVault,
+        credentialVault: brokerCredentialVault,
         itemsStore,
         signal: alpacaNewsController.signal,
         logger: console
@@ -92,23 +97,19 @@ export async function runWorker(): Promise<void> {
     })).poller;
     await writeFile(workerPlacement.readyFile, "ready\n");
 
-    while (shouldRun) {
-      const lock = await pool.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1) AS locked", [WORKER_LOCK_ID]);
-
-      if (lock.rows[0]?.locked) {
-        try {
-          const job = await claimEnabledLiveCycleJob(pool);
-
-          if (job) {
-            await runClaimedJob(pool, job);
-          }
-        } finally {
-          await pool.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID]);
-        }
-      }
-
-      await delay(workerPlacement.pollIntervalMs);
-    }
+    await runPacedCycleScheduler({
+      cadence: workerPlacement.pacedCadence,
+      marketClock,
+      isEnabled: async () => (await runtimeControl.getStatus()).state === "running",
+      runCycle: async () => runClaimableCycle(pool, workerPlacement.pacedCadence.cycleIntervalMs),
+      sleep: async (ms) => {
+        await delay(ms);
+      },
+      shouldContinue: () => shouldRun,
+      idleIntervalMs: workerPlacement.pollIntervalMs,
+      maxSleepMs: workerPlacement.pollIntervalMs,
+      logger: console
+    });
   } finally {
     qualitativePollerController.abort();
     alpacaNewsController.abort();
@@ -166,16 +167,39 @@ export async function maybeStartXHandleIngestPoller(options: XHandleIngestStartO
   return { poller: runXHandleIngestPoller(options) };
 }
 
-async function runClaimedJob(pool: Pool, job: ClaimedRuntimeJob): Promise<void> {
+async function runClaimableCycle(pool: Pool, rearmDelayMs: number): Promise<boolean> {
+  const lock = await pool.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1) AS locked", [WORKER_LOCK_ID]);
+
+  if (!lock.rows[0]?.locked) {
+    return false;
+  }
+
+  try {
+    const job = await claimEnabledLiveCycleJob(pool);
+
+    if (!job) {
+      return false;
+    }
+
+    await runClaimedJob(pool, job, rearmDelayMs);
+    return true;
+  } finally {
+    await pool.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID]);
+  }
+}
+
+async function runClaimedJob(pool: Pool, job: ClaimedRuntimeJob, rearmDelayMs: number): Promise<void> {
   console.log(`claimed job ${job.id} (${job.kind})`);
 
   try {
     const result = await runLiveTradeCycle({ pool, cycleId: `job-${job.id.replaceAll("-", "")}` });
     const orderId = result.execution.order?.id ?? "no broker order";
-    await recordLiveCycleSuccess(pool, job.id, result.decisionLog.id, `Live cycle completed with ${result.execution.decision}; order ${orderId}.`);
+    await recordLiveCycleSuccess(pool, job.id, result.decisionLog.id, `Live cycle completed with ${result.execution.decision}; order ${orderId}.`, {
+      rearmDelayMs
+    });
   } catch (error: unknown) {
     const summary = error instanceof Error ? error.message : "unknown live cycle failure";
-    await recordLiveCycleFailure(pool, job.id, summary);
+    await recordLiveCycleFailure(pool, job.id, summary, { rearmDelayMs });
     console.error(`live cycle job ${job.id} failed: ${summary}`);
   }
 }

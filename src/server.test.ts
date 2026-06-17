@@ -118,6 +118,10 @@ class InMemoryRuntimeControl implements AgentRuntimeControl {
   }
 
   async start(): Promise<AgentRuntimeStatus> {
+    if (this.status.state === "running" && this.status.activeJobId) {
+      return this.status;
+    }
+
     this.starts += 1;
     this.status = { ...this.status, state: "running", activeJobId: `job-${this.starts}`, updatedAt: "2026-06-17T14:01:00.000Z" };
     return this.status;
@@ -1173,17 +1177,25 @@ describe("portal runtime control API", () => {
     assert.equal(body.state, "stopped");
   });
 
-  it("allows admins to start exactly one queued runtime cycle", async () => {
+  it("allows admins to start the continuous runtime idempotently", async () => {
     const token = await authenticate(baseUrl, "cole");
     const response = await fetch(`${baseUrl}/portal/runtime/start`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` }
     });
     const body = (await response.json()) as AgentRuntimeStatus;
+    const repeatResponse = await fetch(`${baseUrl}/portal/runtime/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const repeatBody = (await repeatResponse.json()) as AgentRuntimeStatus;
 
     assert.equal(response.status, 202);
+    assert.equal(repeatResponse.status, 202);
     assert.equal(body.state, "running");
     assert.equal(body.activeJobId, "job-1");
+    assert.equal(repeatBody.state, "running");
+    assert.equal(repeatBody.activeJobId, "job-1");
     assert.equal(runtimeControl.starts, 1);
   });
 
