@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { InMemoryAgentDecisionLogStore } from "./agent-team.js";
 import type {
@@ -356,5 +359,44 @@ describe("portal read API", () => {
     } finally {
       await closeTestServer(started.server);
     }
+  });
+});
+
+describe("portal static assets", () => {
+  let server: Server;
+  let baseUrl = "";
+  let staticAssetsDir = "";
+
+  before(async () => {
+    staticAssetsDir = await mkdtemp(join(tmpdir(), "atp-portal-"));
+    await mkdir(join(staticAssetsDir, "assets"));
+    await writeFile(join(staticAssetsDir, "index.html"), "<div id=\"root\"></div>");
+    await writeFile(join(staticAssetsDir, "assets", "app.js"), "console.log('portal');");
+
+    const started = await startTestServer({ staticAssetsDir });
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+    await rm(staticAssetsDir, { recursive: true, force: true });
+  });
+
+  it("serves the SPA index from the node server", async () => {
+    const response = await fetch(`${baseUrl}/`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(await response.text(), "<div id=\"root\"></div>");
+  });
+
+  it("serves hashed client assets without requiring portal auth", async () => {
+    const response = await fetch(`${baseUrl}/assets/app.js`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/javascript; charset=utf-8");
+    assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    assert.equal(await response.text(), "console.log('portal');");
   });
 });

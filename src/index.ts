@@ -21,7 +21,8 @@ const server = createServer({
   databaseUrl,
   identityProvider: createIdentityProvider(process.env),
   broker: new AlpacaPaperAdapter(brokerCredentialVault, ALPACA_PAPER_BROKER_ACCOUNT_ID),
-  decisionLogStore: new PostgresAgentDecisionLogStore(pool)
+  decisionLogStore: new PostgresAgentDecisionLogStore(pool),
+  staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
 });
 
 process.on("SIGINT", () => {

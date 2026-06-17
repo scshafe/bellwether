@@ -4,22 +4,34 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
-    "lint": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "build": "npm run build:server && npm run build:client",
+    "build:client": "npm run typecheck:client && node ./node_modules/vite/bin/vite.js build --config client/vite.config.ts",
+    "build:server": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
+    "lint": "npm run typecheck",
     "start": "node dist/index.js",
     "test": "npm run build && node --test dist/*.test.js",
-    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "typecheck": "npm run typecheck:server && npm run typecheck:client",
+    "typecheck:client": "node ./node_modules/typescript/bin/tsc --noEmit -p client/tsconfig.json",
+    "typecheck:server": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
     "worker": "node dist/worker.js"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",
     "@types/pg": "^8.20.0",
-    "typescript": "^5.8.3"
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^5.8.3",
+    "vite": "^8.0.16"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "pg": "^8.21.0"
+    "@reduxjs/toolkit": "^2.12.0",
+    "pg": "^8.21.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-redux": "^9.3.0"
   }
 }

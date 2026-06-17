@@ -6,6 +6,7 @@ COPY package*.json ./
 RUN npm ci
 
 COPY tsconfig.json ./
+COPY client ./client
 COPY src ./src
 RUN npm run build
 
@@ -18,6 +19,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/client/dist ./client/dist
 COPY db ./db
 
 CMD ["node", "dist/index.js"]

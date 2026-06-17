@@ -1,4 +1,6 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
 
 import {
   adminBoundaryRoles,
@@ -17,6 +19,7 @@ export type ServerOptions = {
   identityProvider?: IdentityProvider;
   broker?: BrokerAdapter;
   decisionLogStore?: AgentDecisionLogStore;
+  staticAssetsDir?: string;
 };
 
 export async function handleRequest(
@@ -80,6 +83,10 @@ export async function handleRequest(
     return;
   }
 
+  if (await handleStaticAssets(request, response, url, options.staticAssetsDir)) {
+    return;
+  }
+
   writeJson(response, 404, { error: "not_found" });
 }
 
@@ -140,6 +147,134 @@ async function handlePortalDecisions(
   }
 
   writeJson(response, 200, { decisions: await decisionLogStore.listDecisions(limit), limit });
+}
+
+async function handleStaticAssets(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  staticAssetsDir: string | undefined
+): Promise<boolean> {
+  if (!staticAssetsDir || (request.method !== "GET" && request.method !== "HEAD")) {
+    return false;
+  }
+
+  const root = resolve(staticAssetsDir);
+  const requestedPath = safeStaticPath(root, url.pathname);
+
+  if (!requestedPath) {
+    writeJson(response, 403, { error: "forbidden" });
+    return true;
+  }
+
+  const filePath = await readStaticFilePath(requestedPath, root, url.pathname);
+
+  if (!filePath) {
+    return false;
+  }
+
+  try {
+    const body = await readFile(filePath);
+    response.writeHead(200, {
+      "content-type": contentTypeFor(filePath),
+      "cache-control": filePath.includes(`${sep}assets${sep}`) ? "public, max-age=31536000, immutable" : "no-cache"
+    });
+
+    if (request.method === "HEAD") {
+      response.end();
+      return true;
+    }
+
+    response.end(body);
+    return true;
+  } catch (error: unknown) {
+    if (isNotFoundError(error)) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function readStaticFilePath(requestedPath: string, root: string, pathname: string): Promise<string | null> {
+  const requestedFile = await readableFilePath(requestedPath);
+
+  if (requestedFile) {
+    return requestedFile;
+  }
+
+  if (extname(pathname)) {
+    return null;
+  }
+
+  const indexPath = safeStaticPath(root, "/index.html");
+
+  if (!indexPath) {
+    return null;
+  }
+
+  return readableFilePath(indexPath);
+}
+
+async function readableFilePath(filePath: string): Promise<string | null> {
+  try {
+    const stats = await stat(filePath);
+    return stats.isFile() ? filePath : null;
+  } catch (error: unknown) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function safeStaticPath(root: string, pathname: string): string | null {
+  let decodedPath = "/";
+
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+
+  const relativePath = decodedPath === "/" ? "index.html" : decodedPath.replace(/^\/+/, "");
+  const candidate = resolve(root, relativePath);
+
+  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
+    return null;
+  }
+
+  return candidate;
+}
+
+function contentTypeFor(filePath: string): string {
+  switch (extname(filePath)) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".ico":
+      return "image/x-icon";
+    case ".map":
+      return "application/json; charset=utf-8";
+    case ".woff2":
+      return "font/woff2";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
 async function requireRole(
