@@ -11,7 +11,7 @@ import { ensureQualitativeItemsSchema, ensureSourcesSchema } from "./qualitative
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
-import { ensureStrategiesSchema } from "./strategy.js";
+import { ensureStrategiesSchema, PostgresStrategyStore } from "./strategy.js";
 
 const endpoints = readServerEndpointsConfig();
 const { databaseUrl } = readDatabaseUrlConfig();
@@ -30,6 +30,7 @@ const server = createServer({
   broker: new AlpacaPaperAdapter(brokerCredentialVault, ALPACA_PAPER_BROKER_ACCOUNT_ID),
   decisionLogStore: new PostgresAgentDecisionLogStore(pool),
   runtimeControl: new PostgresAgentRuntimeControl(pool),
+  strategyStore: new PostgresStrategyStore(pool),
   staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
 });
 

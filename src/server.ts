@@ -13,7 +13,16 @@ import {
 } from "./identity.js";
 import type { AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAdapter } from "./broker.js";
+import type { QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
+import {
+  StrategyLifecycleError,
+  StrategyNotFoundError,
+  type CreateStrategyInput,
+  type StrategyRecord,
+  type StrategyStore,
+  type UpdateStrategyPatch
+} from "./strategy.js";
 
 export type ServerOptions = {
   databaseUrl?: string;
@@ -21,6 +30,7 @@ export type ServerOptions = {
   broker?: BrokerAdapter;
   decisionLogStore?: AgentDecisionLogStore;
   runtimeControl?: AgentRuntimeControl;
+  strategyStore?: StrategyStore;
   staticAssetsDir?: string;
 };
 
@@ -96,6 +106,28 @@ export async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/portal/strategies") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handlePortalStrategies(response, options.strategyStore, user);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/portal/strategies") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleStrategyCreate(request, response, options.strategyStore);
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/portal/runtime/start") {
     const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
 
@@ -115,6 +147,35 @@ export async function handleRequest(
     }
 
     await handleRuntimeStop(response, options.runtimeControl);
+    return;
+  }
+
+  const strategyRoute = parseStrategyRoute(url.pathname);
+
+  if (request.method === "PATCH" && strategyRoute && strategyRoute.action === null) {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleStrategyUpdate(request, response, options.strategyStore, strategyRoute.id);
+    return;
+  }
+
+  if (request.method === "POST" && strategyRoute && strategyRoute.action !== null) {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    if (!isStrategyAction(strategyRoute.action)) {
+      writeJson(response, 404, { error: "not_found" });
+      return;
+    }
+
+    await handleStrategyTransition(request, response, options.strategyStore, strategyRoute.id, strategyRoute.action);
     return;
   }
 
@@ -182,6 +243,154 @@ async function handlePortalDecisions(
   }
 
   writeJson(response, 200, { decisions: await decisionLogStore.listDecisions(limit), limit });
+}
+
+async function handlePortalStrategies(
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined,
+  user: AuthenticatedUser
+): Promise<void> {
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return;
+  }
+
+  const strategies = await strategyStore.listStrategies();
+  writeJson(response, 200, {
+    strategies: user.role === "viewer" ? strategies.filter((strategy) => strategy.status !== "draft") : strategies
+  });
+}
+
+async function handleStrategyCreate(
+  request: IncomingMessage,
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined
+): Promise<void> {
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return;
+  }
+
+  const body = await readStrategyJsonBody(response, request);
+
+  if (body === invalidJsonBody) {
+    return;
+  }
+
+  const input = toCreateStrategyInput(body);
+
+  if (!input) {
+    writeJson(response, 400, { error: "invalid_strategy_payload" });
+    return;
+  }
+
+  await writeStrategyMutationResult(response, 201, () => strategyStore.createStrategy(input));
+}
+
+async function handleStrategyUpdate(
+  request: IncomingMessage,
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined,
+  strategyId: string
+): Promise<void> {
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return;
+  }
+
+  const body = await readStrategyJsonBody(response, request);
+
+  if (body === invalidJsonBody) {
+    return;
+  }
+
+  const patch = toUpdateStrategyPatch(body);
+
+  if (!patch) {
+    writeJson(response, 400, { error: "invalid_strategy_payload" });
+    return;
+  }
+
+  await writeStrategyMutationResult(response, 200, () => strategyStore.updateStrategy(strategyId, patch));
+}
+
+async function handleStrategyTransition(
+  request: IncomingMessage,
+  response: ServerResponse,
+  strategyStore: StrategyStore | undefined,
+  strategyId: string,
+  action: StrategyAction
+): Promise<void> {
+  if (!strategyStore) {
+    writeJson(response, 503, { error: "strategy_store_unavailable" });
+    return;
+  }
+
+  if (action === "pause" || action === "retire") {
+    const body = await readStrategyJsonBody(response, request);
+
+    if (body === invalidJsonBody) {
+      return;
+    }
+
+    const reason = toOptionalStrategyReason(body);
+
+    if (reason === invalidStrategyReason) {
+      writeJson(response, 400, { error: "invalid_strategy_payload" });
+      return;
+    }
+
+    await writeStrategyMutationResult(response, 200, () =>
+      action === "pause" ? strategyStore.pauseStrategy(strategyId, reason) : strategyStore.retireStrategy(strategyId, reason)
+    );
+    return;
+  }
+
+  await writeStrategyMutationResult(response, 200, () => {
+    switch (action) {
+      case "discuss":
+        return strategyStore.startDiscussion(strategyId);
+      case "return-to-draft":
+        return strategyStore.returnToDraft(strategyId);
+      case "approve":
+        return strategyStore.approveStrategy(strategyId);
+      case "activate":
+        return strategyStore.activateStrategy(strategyId);
+      case "resume":
+        return strategyStore.resumeStrategy(strategyId);
+    }
+  });
+}
+
+async function writeStrategyMutationResult(
+  response: ServerResponse,
+  successStatus: number,
+  operation: () => Promise<StrategyRecord>
+): Promise<void> {
+  try {
+    writeJson(response, successStatus, await operation());
+  } catch (error: unknown) {
+    writeStrategyError(response, error);
+  }
+}
+
+function writeStrategyError(response: ServerResponse, error: unknown): void {
+  if (error instanceof StrategyNotFoundError) {
+    writeJson(response, 404, { error: "strategy_not_found" });
+    return;
+  }
+
+  if (error instanceof StrategyLifecycleError) {
+    writeJson(response, 409, { error: "strategy_lifecycle_conflict" });
+    return;
+  }
+
+  if (error instanceof Error) {
+    writeJson(response, 400, { error: "invalid_strategy_payload" });
+    return;
+  }
+
+  writeJson(response, 400, { error: "invalid_strategy_payload" });
 }
 
 async function handleRuntimeStatus(response: ServerResponse, runtimeControl: AgentRuntimeControl | undefined): Promise<void> {
@@ -404,6 +613,140 @@ function parseDecisionLimit(url: URL): number {
   return Math.min(Math.max(Math.trunc(parsed), 1), 100);
 }
 
+type StrategyRoute = {
+  id: string;
+  action: string | null;
+};
+
+type StrategyAction = (typeof strategyActions)[number];
+
+function parseStrategyRoute(pathname: string): StrategyRoute | null {
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (parts[0] !== "portal" || parts[1] !== "strategies" || parts.length < 3 || parts.length > 4) {
+    return null;
+  }
+
+  const id = decodeURIComponent(parts[2] ?? "").trim();
+
+  if (!id) {
+    return null;
+  }
+
+  return { id, action: parts[3] ?? null };
+}
+
+function isStrategyAction(action: string): action is StrategyAction {
+  return strategyActions.includes(action as StrategyAction);
+}
+
+async function readStrategyJsonBody(response: ServerResponse, request: IncomingMessage): Promise<unknown | typeof invalidJsonBody> {
+  try {
+    return await readJsonBody(request);
+  } catch {
+    writeJson(response, 400, { error: "invalid_json" });
+    return invalidJsonBody;
+  }
+}
+
+function toCreateStrategyInput(value: unknown): CreateStrategyInput | null {
+  if (!isRecord(value) || typeof value.name !== "string") {
+    return null;
+  }
+
+  if (value.description !== undefined && typeof value.description !== "string") {
+    return null;
+  }
+
+  const parameters = toQuantPlaybookParameters(value.parameters);
+
+  if (!parameters) {
+    return null;
+  }
+
+  return {
+    name: value.name,
+    ...(value.description !== undefined ? { description: value.description } : {}),
+    parameters
+  };
+}
+
+function toUpdateStrategyPatch(value: unknown): UpdateStrategyPatch | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const patch: UpdateStrategyPatch = {};
+
+  if (value.name !== undefined) {
+    if (typeof value.name !== "string") {
+      return null;
+    }
+
+    patch.name = value.name;
+  }
+
+  if (value.description !== undefined) {
+    if (typeof value.description !== "string" && value.description !== null) {
+      return null;
+    }
+
+    patch.description = value.description;
+  }
+
+  if (value.parameters !== undefined) {
+    const parameters = toQuantPlaybookParameters(value.parameters);
+
+    if (!parameters) {
+      return null;
+    }
+
+    patch.parameters = parameters;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function toOptionalStrategyReason(value: unknown): string | undefined | typeof invalidStrategyReason {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    return invalidStrategyReason;
+  }
+
+  if (value.reason === undefined) {
+    return undefined;
+  }
+
+  return typeof value.reason === "string" ? value.reason : invalidStrategyReason;
+}
+
+function toQuantPlaybookParameters(value: unknown): QuantPlaybookParameters | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const parameters: Partial<QuantPlaybookParameters> = {};
+
+  for (const key of quantPlaybookParameterKeys) {
+    const parameter = value[key];
+
+    if (typeof parameter !== "number" || !Number.isFinite(parameter)) {
+      return null;
+    }
+
+    parameters[key] = parameter;
+  }
+
+  return parameters as QuantPlaybookParameters;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   let body = "";
 
@@ -436,3 +779,21 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.writeHead(statusCode, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
 }
+
+const strategyActions = ["discuss", "return-to-draft", "approve", "activate", "pause", "resume", "retire"] as const;
+const invalidJsonBody = Symbol("invalidJsonBody");
+const invalidStrategyReason = Symbol("invalidStrategyReason");
+const quantPlaybookParameterKeys = [
+  "minPrice",
+  "minAverageDollarVolume",
+  "signalLookbackBars",
+  "minMomentumFraction",
+  "maxVolatilityFraction",
+  "volatilityPenalty",
+  "maxPositionNotional",
+  "maxPositionEquityFraction",
+  "maxSectorEquityFraction",
+  "maxLiquidityParticipationFraction",
+  "maxOpenPositions",
+  "dailyDrawdownStopFraction"
+] as const;

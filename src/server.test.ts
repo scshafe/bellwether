@@ -19,6 +19,8 @@ import type {
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord } from "./identity.js";
 import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.js";
 import { createServer, type ServerOptions } from "./server.js";
+import { InMemoryStrategyStore, type StrategyRecord } from "./strategy.js";
+import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
 
 class StubBrokerAdapter implements BrokerAdapter {
   async getAccount(): Promise<BrokerAccount> {
@@ -98,6 +100,55 @@ class InMemoryRuntimeControl implements AgentRuntimeControl {
   }
 }
 
+class RecordingStrategyStore extends InMemoryStrategyStore {
+  readonly calls: string[] = [];
+
+  override async createStrategy(input: Parameters<InMemoryStrategyStore["createStrategy"]>[0]): Promise<StrategyRecord> {
+    this.calls.push("createStrategy");
+    return super.createStrategy(input);
+  }
+
+  override async updateStrategy(id: string, patch: Parameters<InMemoryStrategyStore["updateStrategy"]>[1]): Promise<StrategyRecord> {
+    this.calls.push("updateStrategy");
+    return super.updateStrategy(id, patch);
+  }
+
+  override async startDiscussion(id: string): Promise<StrategyRecord> {
+    this.calls.push("startDiscussion");
+    return super.startDiscussion(id);
+  }
+
+  override async returnToDraft(id: string): Promise<StrategyRecord> {
+    this.calls.push("returnToDraft");
+    return super.returnToDraft(id);
+  }
+
+  override async approveStrategy(id: string): Promise<StrategyRecord> {
+    this.calls.push("approveStrategy");
+    return super.approveStrategy(id);
+  }
+
+  override async activateStrategy(id: string): Promise<StrategyRecord> {
+    this.calls.push("activateStrategy");
+    return super.activateStrategy(id);
+  }
+
+  override async pauseStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    this.calls.push("pauseStrategy");
+    return super.pauseStrategy(id, reason);
+  }
+
+  override async resumeStrategy(id: string): Promise<StrategyRecord> {
+    this.calls.push("resumeStrategy");
+    return super.resumeStrategy(id);
+  }
+
+  override async retireStrategy(id: string, reason?: string): Promise<StrategyRecord> {
+    this.calls.push("retireStrategy");
+    return super.retireStrategy(id, reason);
+  }
+}
+
 async function startTestServer(options: ServerOptions = {}): Promise<{ baseUrl: string; server: Server }> {
   const server = createServer(options);
 
@@ -164,6 +215,26 @@ async function authenticate(baseUrl: string, username: string): Promise<string> 
   assert.equal(typeof body.token, "string");
 
   return body.token ?? "";
+}
+
+function strategyParameters(overrides: Partial<QuantPlaybookParameters> = {}): QuantPlaybookParameters {
+  return { ...DEFAULT_QUANT_PLAYBOOK_PARAMETERS, ...overrides };
+}
+
+async function postJson(baseUrl: string, path: string, token: string, body: unknown = null): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: body === null ? undefined : JSON.stringify(body)
+  });
+}
+
+async function patchJson(baseUrl: string, path: string, token: string, body: unknown): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
 }
 
 describe("health endpoint", () => {
@@ -398,6 +469,202 @@ describe("portal read API", () => {
       assert.deepEqual(await decisionsResponse.json(), { error: "decision_log_unavailable" });
     } finally {
       await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("portal strategy registry API", () => {
+  let server: Server;
+  let baseUrl = "";
+  let strategyStore: RecordingStrategyStore;
+  let adminToken = "";
+  let managerToken = "";
+  let viewerToken = "";
+
+  before(async () => {
+    strategyStore = new RecordingStrategyStore();
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), strategyStore });
+    server = started.server;
+    baseUrl = started.baseUrl;
+    adminToken = await authenticate(baseUrl, "cole");
+    managerToken = await authenticate(baseUrl, "brother");
+    viewerToken = await authenticate(baseUrl, "family");
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("creates strategies through the admin boundary and ignores client lifecycle fields", async () => {
+    const response = await postJson(baseUrl, "/portal/strategies", adminToken, {
+      id: "client-supplied-id",
+      name: "  Momentum income  ",
+      description: "Operator-authored strategy",
+      status: "active",
+      parameters: strategyParameters()
+    });
+    const body = (await response.json()) as StrategyRecord;
+
+    assert.equal(response.status, 201);
+    assert.equal(body.name, "Momentum income");
+    assert.equal(body.description, "Operator-authored strategy");
+    assert.equal(body.status, "draft");
+    assert.notEqual(body.id, "client-supplied-id");
+    assert.equal(strategyStore.calls.at(-1), "createStrategy");
+  });
+
+  it("lists all strategies to admin and manager but hides drafts from viewers", async () => {
+    const draft = await strategyStore.createStrategy({ name: "Viewer-hidden draft", parameters: strategyParameters() });
+    const approved = await strategyStore.createStrategy({ name: "Viewer-visible approved", parameters: strategyParameters() });
+    await strategyStore.approveStrategy(approved.id);
+
+    const adminResponse = await fetch(`${baseUrl}/portal/strategies`, {
+      headers: { authorization: `Bearer ${adminToken}` }
+    });
+    const managerResponse = await fetch(`${baseUrl}/portal/strategies`, {
+      headers: { authorization: `Bearer ${managerToken}` }
+    });
+    const viewerResponse = await fetch(`${baseUrl}/portal/strategies`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    const adminBody = (await adminResponse.json()) as { strategies?: StrategyRecord[] };
+    const managerBody = (await managerResponse.json()) as { strategies?: StrategyRecord[] };
+    const viewerBody = (await viewerResponse.json()) as { strategies?: StrategyRecord[] };
+
+    assert.equal(adminResponse.status, 200);
+    assert.equal(managerResponse.status, 200);
+    assert.equal(viewerResponse.status, 200);
+    assert.ok(adminBody.strategies?.some((strategy) => strategy.id === draft.id && strategy.status === "draft"));
+    assert.ok(managerBody.strategies?.some((strategy) => strategy.id === draft.id && strategy.status === "draft"));
+    assert.ok(viewerBody.strategies?.some((strategy) => strategy.id === approved.id));
+    assert.equal(viewerBody.strategies?.some((strategy) => strategy.id === draft.id), false);
+    assert.equal(viewerBody.strategies?.some((strategy) => strategy.status === "draft"), false);
+  });
+
+  it("blocks viewer mutations and unauthenticated strategy reads before store access", async () => {
+    const callsBefore = strategyStore.calls.length;
+    const viewerResponse = await postJson(baseUrl, "/portal/strategies", viewerToken, {
+      name: "Viewer mutation",
+      parameters: strategyParameters()
+    });
+    const unauthenticatedResponse = await fetch(`${baseUrl}/portal/strategies`);
+
+    assert.equal(viewerResponse.status, 403);
+    assert.deepEqual(await viewerResponse.json(), { error: "forbidden" });
+    assert.equal(unauthenticatedResponse.status, 401);
+    assert.deepEqual(await unauthenticatedResponse.json(), { error: "missing_session" });
+    assert.equal(strategyStore.calls.length, callsBefore);
+  });
+
+  it("updates draft strategy fields through PATCH /portal/strategies/:id", async () => {
+    const strategy = await strategyStore.createStrategy({ name: "Patch target", description: "remove me", parameters: strategyParameters() });
+    const response = await patchJson(baseUrl, `/portal/strategies/${strategy.id}`, managerToken, {
+      name: "Patched target",
+      description: null,
+      parameters: strategyParameters({ maxOpenPositions: 4 })
+    });
+    const body = (await response.json()) as StrategyRecord;
+
+    assert.equal(response.status, 200);
+    assert.equal(body.name, "Patched target");
+    assert.equal(body.description, undefined);
+    assert.equal(body.parameters.maxOpenPositions, 4);
+    assert.equal(strategyStore.calls.at(-1), "updateStrategy");
+  });
+
+  it("routes each lifecycle transition endpoint to the matching store method", async () => {
+    const callsBefore = strategyStore.calls.length;
+    const discussion = await strategyStore.createStrategy({ name: "Discussion target", parameters: strategyParameters() });
+    const discussionResponse = await postJson(baseUrl, `/portal/strategies/${discussion.id}/discuss`, adminToken);
+    const discussionBody = (await discussionResponse.json()) as StrategyRecord;
+
+    const draftResponse = await postJson(baseUrl, `/portal/strategies/${discussion.id}/return-to-draft`, adminToken);
+    const draftBody = (await draftResponse.json()) as StrategyRecord;
+
+    const approved = await strategyStore.createStrategy({ name: "Approve target", parameters: strategyParameters() });
+    const approveResponse = await postJson(baseUrl, `/portal/strategies/${approved.id}/approve`, adminToken);
+    const approveBody = (await approveResponse.json()) as StrategyRecord;
+
+    const active = await strategyStore.createStrategy({ name: "Activate target", parameters: strategyParameters() });
+    await strategyStore.approveStrategy(active.id);
+    const activateResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/activate`, adminToken);
+    const activateBody = (await activateResponse.json()) as StrategyRecord;
+
+    const pauseResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/pause`, adminToken, { reason: "Market close" });
+    const pauseBody = (await pauseResponse.json()) as StrategyRecord;
+
+    const resumeResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/resume`, adminToken);
+    const resumeBody = (await resumeResponse.json()) as StrategyRecord;
+
+    const retireResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/retire`, adminToken, { reason: "Superseded" });
+    const retireBody = (await retireResponse.json()) as StrategyRecord;
+
+    assert.equal(discussionResponse.status, 200);
+    assert.equal(discussionBody.status, "under_discussion");
+    assert.equal(draftResponse.status, 200);
+    assert.equal(draftBody.status, "draft");
+    assert.equal(approveResponse.status, 200);
+    assert.equal(approveBody.status, "approved");
+    assert.equal(activateResponse.status, 200);
+    assert.equal(activateBody.status, "active");
+    assert.equal(pauseResponse.status, 200);
+    assert.equal(pauseBody.status, "paused");
+    assert.equal(pauseBody.reason, "Market close");
+    assert.equal(resumeResponse.status, 200);
+    assert.equal(resumeBody.status, "active");
+    assert.equal(retireResponse.status, 200);
+    assert.equal(retireBody.status, "retired");
+    assert.equal(retireBody.reason, "Superseded");
+    assert.deepEqual(strategyStore.calls.slice(callsBefore), [
+      "createStrategy",
+      "startDiscussion",
+      "returnToDraft",
+      "createStrategy",
+      "approveStrategy",
+      "createStrategy",
+      "approveStrategy",
+      "activateStrategy",
+      "pauseStrategy",
+      "resumeStrategy",
+      "retireStrategy"
+    ]);
+  });
+
+  it("maps unknown ids, invalid transitions, bad bodies, and missing dependencies", async () => {
+    const unknownResponse = await postJson(
+      baseUrl,
+      "/portal/strategies/99999999-9999-4999-8999-999999999999/approve",
+      adminToken
+    );
+    const active = await strategyStore.createStrategy({ name: "Conflict target", parameters: strategyParameters() });
+    await strategyStore.approveStrategy(active.id);
+    await strategyStore.activateStrategy(active.id);
+    const conflictResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/approve`, adminToken);
+    const badCreateResponse = await postJson(baseUrl, "/portal/strategies", adminToken, { name: "Bad params", parameters: {} });
+    const badUpdateResponse = await patchJson(baseUrl, `/portal/strategies/${active.id}`, adminToken, { status: "active" });
+    const badReasonResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/pause`, adminToken, { reason: 42 });
+    const missingStarted = await startTestServer({ identityProvider: testIdentityProvider() });
+
+    try {
+      const token = await authenticate(missingStarted.baseUrl, "cole");
+      const missingResponse = await fetch(`${missingStarted.baseUrl}/portal/strategies`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+
+      assert.equal(unknownResponse.status, 404);
+      assert.deepEqual(await unknownResponse.json(), { error: "strategy_not_found" });
+      assert.equal(conflictResponse.status, 409);
+      assert.deepEqual(await conflictResponse.json(), { error: "strategy_lifecycle_conflict" });
+      assert.equal(badCreateResponse.status, 400);
+      assert.deepEqual(await badCreateResponse.json(), { error: "invalid_strategy_payload" });
+      assert.equal(badUpdateResponse.status, 400);
+      assert.deepEqual(await badUpdateResponse.json(), { error: "invalid_strategy_payload" });
+      assert.equal(badReasonResponse.status, 400);
+      assert.deepEqual(await badReasonResponse.json(), { error: "invalid_strategy_payload" });
+      assert.equal(missingResponse.status, 503);
+      assert.deepEqual(await missingResponse.json(), { error: "strategy_store_unavailable" });
+    } finally {
+      await closeTestServer(missingStarted.server);
     }
   });
 });
