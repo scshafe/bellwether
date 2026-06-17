@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { requireConfigValue } from "./config.js";
+import { getOrderGuardRailViolations, type OrderGuardRails } from "./order-rails.js";
 import { InMemorySecretsStore, type BrokerCredentialVault, type SecretsStore } from "./secrets.js";
 
 export const ALPACA_PAPER_BROKER_ACCOUNT_ID = "alpaca-paper";
@@ -78,6 +79,7 @@ export interface BrokerAdapter {
 export type AlpacaPaperAdapterOptions = {
   fetchFn?: typeof fetch;
   maxEstimatedNotional?: number;
+  orderGuardRails?: OrderGuardRails | (() => OrderGuardRails | Promise<OrderGuardRails>);
 };
 
 export class BrokerOrderRejectedError extends Error {
@@ -90,6 +92,7 @@ export class BrokerOrderRejectedError extends Error {
 export class AlpacaPaperAdapter implements BrokerAdapter {
   private readonly fetchFn: typeof fetch;
   private readonly maxEstimatedNotional: number;
+  private readonly orderGuardRails?: OrderGuardRails | (() => OrderGuardRails | Promise<OrderGuardRails>);
 
   constructor(
     private readonly credentialVault: BrokerCredentialVault,
@@ -98,6 +101,7 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
   ) {
     this.fetchFn = options.fetchFn ?? fetch;
     this.maxEstimatedNotional = options.maxEstimatedNotional ?? defaultMaxEstimatedNotional;
+    this.orderGuardRails = options.orderGuardRails;
   }
 
   async getAccount(): Promise<BrokerAccount> {
@@ -135,6 +139,7 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
 
   async placeOrder(order: BrokerOrderRequest): Promise<BrokerOrder> {
     validateOrder(order, this.maxEstimatedNotional);
+    await this.validateOrderGuardRails(order);
 
     const body = await this.request("/v2/orders", {
       method: "POST",
@@ -211,6 +216,19 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
 
     const text = await response.text();
     return text ? (JSON.parse(text) as unknown) : null;
+  }
+
+  private async validateOrderGuardRails(order: BrokerOrderRequest): Promise<void> {
+    if (!this.orderGuardRails) {
+      return;
+    }
+
+    const rails = typeof this.orderGuardRails === "function" ? await this.orderGuardRails() : this.orderGuardRails;
+    const violations = getOrderGuardRailViolations(order, rails);
+
+    if (violations.length > 0) {
+      throw new BrokerOrderRejectedError(`order violates quant guard rails: ${violations.join("; ")}`);
+    }
   }
 }
 

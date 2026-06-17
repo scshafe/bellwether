@@ -10,6 +10,7 @@ import {
   BrokerOrderRejectedError,
   createAlpacaPaperSecretsStore
 } from "./broker.js";
+import { type OrderGuardRails } from "./order-rails.js";
 import { InMemorySecretsStore, SecretsBackedBrokerCredentialVault } from "./secrets.js";
 
 type FetchCall = {
@@ -244,6 +245,63 @@ describe("AlpacaPaperAdapter", () => {
           timeInForce: "day"
         }),
       BrokerOrderRejectedError
+    );
+    assert.equal(fetchCalls, 0);
+  });
+
+  it("rejects orders outside quant guard rails before calling Alpaca", async () => {
+    let fetchCalls = 0;
+    const rails: OrderGuardRails = {
+      asOf: "2026-06-17T14:30:00Z",
+      equity: 20_000,
+      maxOpenPositions: 5,
+      openSymbols: ["AAPL"],
+      dailyDrawdown: { maxLossFraction: 0.03, currentLossFraction: 0, triggered: false },
+      symbols: {
+        AAPL: {
+          symbol: "AAPL",
+          sector: "technology",
+          lastPrice: 100,
+          averageDollarVolume: 2_000_000,
+          maxBuyQty: 2,
+          maxBuyNotional: 200,
+          maxSellQty: 1,
+          maxSellNotional: 100,
+          remainingSectorBuyNotional: 200
+        }
+      }
+    };
+    const adapter = new AlpacaPaperAdapter(testVault(), "alpaca-paper", {
+      orderGuardRails: rails,
+      fetchFn: async () => {
+        fetchCalls += 1;
+        return responseJson({});
+      }
+    });
+
+    await assert.rejects(
+      () =>
+        adapter.placeOrder({
+          symbol: "AAPL",
+          qty: 3,
+          side: "buy",
+          type: "limit",
+          limitPrice: 100,
+          timeInForce: "day"
+        }),
+      /order violates quant guard rails/u
+    );
+    await assert.rejects(
+      () =>
+        adapter.placeOrder({
+          symbol: "GOOG",
+          qty: 1,
+          side: "buy",
+          type: "limit",
+          limitPrice: 100,
+          timeInForce: "day"
+        }),
+      /outside the playbook universe/u
     );
     assert.equal(fetchCalls, 0);
   });
