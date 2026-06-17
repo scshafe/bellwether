@@ -51,12 +51,16 @@ services:
       PUBLIC_BASE_URL: "https://elrics-mac-mini.tail49736b.ts.net:8443"
       DATABASE_URL: "postgres://atp:${POSTGRES_PASSWORD}@db:5432/agent_trading_platform"
       ALPACA_PAPER_CREDENTIAL_FILE: /run/secrets/alpaca-paper.env
+      # P6c runs the Strategy/Analyst chat agent in the server request path, so the
+      # server now needs the OpenAI-OAuth credential (same file the worker mounts).
+      LLM_OAUTH_CREDENTIAL_FILE: /run/secrets/openai-oauth.json
       PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?set PORTAL_ADMIN_PASSWORD in .env}
       PORTAL_ADMIN_DISPLAY_NAME: "Cole (admin)"
       PORTAL_ADMIN_ROLE: admin
     volumes:
       - ${BELLWETHER_AGENT_RESOURCES}/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
+      - ${BELLWETHER_AGENT_RESOURCES}/openai-oauth.json:/run/secrets/openai-oauth.json:ro
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
