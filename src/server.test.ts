@@ -315,6 +315,22 @@ async function deleteJson(baseUrl: string, path: string, token: string): Promise
   });
 }
 
+async function authenticatedRawRequest(
+  baseUrl: string,
+  path: string,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  token: string,
+  body?: string
+): Promise<Response> {
+  const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+
+  return fetch(`${baseUrl}${path}`, { method, headers, ...(body !== undefined ? { body } : {}) });
+}
+
 describe("health endpoint", () => {
   let server: Server;
   let baseUrl = "";
@@ -399,6 +415,182 @@ describe("identity API boundary", () => {
 
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: "missing_session" });
+  });
+});
+
+describe("viewer portal role audit", () => {
+  let server: Server;
+  let baseUrl = "";
+  let viewerToken = "";
+  let strategyStore: RecordingStrategyStore;
+  let sourcesStore: RecordingSourcesStore;
+  let runtimeControl: InMemoryRuntimeControl;
+  let proposalsStore: InMemoryStrategyProposalsStore;
+  let strategyId = "";
+  let draftStrategyId = "";
+  let approvedStrategyId = "";
+  const sourceId = "11111111-1111-4111-8111-111111111111";
+  const proposalId = "proposal-viewer-audit";
+
+  before(async () => {
+    const decisionLogStore = new InMemoryAgentDecisionLogStore();
+    strategyStore = new RecordingStrategyStore();
+    sourcesStore = new RecordingSourcesStore([
+      {
+        id: sourceId,
+        sourceKey: "viewer-audit-rss",
+        name: "Viewer Audit RSS",
+        sourceType: "rss",
+        feedUrl: "https://feeds.example.test/viewer-audit.xml",
+        enabled: true,
+        qualityRating: 4,
+        createdAt: "2026-06-17T10:00:00.000Z",
+        updatedAt: "2026-06-17T10:00:00.000Z"
+      }
+    ]);
+    runtimeControl = new InMemoryRuntimeControl();
+    proposalsStore = new InMemoryStrategyProposalsStore();
+
+    await decisionLogStore.recordDecision({
+      id: "44444444-4444-4444-8444-444444444444",
+      cycleId: "viewer-audit-cycle",
+      strategyId: "33333333-3333-3333-8333-333333333333",
+      createdAt: "2026-06-17T13:00:00.000Z",
+      quantSignal: {
+        asOf: "2026-06-17T13:00:00.000Z",
+        symbol: "AAPL",
+        score: 0.9,
+        signals: { momentumFraction: 0.9, volatilityFraction: 0.1, averageDollarVolume: 1_000_000, score: 0.9 },
+        sizing: { maxQty: 1, maxNotional: 195 }
+      },
+      brokerSnapshot: { account: await new StubBrokerAdapter().getAccount(), positions: await new StubBrokerAdapter().getPositions() },
+      strategyAnalyst: {
+        thesis: "Viewer audit thesis",
+        proposedOrder: {
+          symbol: "AAPL",
+          qty: 1,
+          side: "buy",
+          type: "limit",
+          timeInForce: "day",
+          limitPrice: 195,
+          estimatedNotional: 195,
+          strategyId: "33333333-3333-3333-8333-333333333333"
+        }
+      },
+      risk: { approved: true, verdict: "approved", rationale: "Viewer audit risk", deterministicViolations: [] },
+      execution: { decision: "skipped", rationale: "Viewer audit execution" }
+    });
+
+    const strategy = await strategyStore.createStrategy({ name: "Viewer audit target", parameters: strategyParameters() });
+    const draftStrategy = await strategyStore.createStrategy({ name: "Viewer-hidden draft", parameters: strategyParameters() });
+    const approvedStrategy = await strategyStore.createStrategy({ name: "Viewer-visible approved", parameters: strategyParameters() });
+    await strategyStore.approveStrategy(approvedStrategy.id);
+    strategyId = strategy.id;
+    draftStrategyId = draftStrategy.id;
+    approvedStrategyId = approvedStrategy.id;
+
+    await proposalsStore.recordProposal({
+      id: proposalId,
+      suggestedCandidate: {
+        name: "Viewer audit proposal",
+        mandate: "Operators must review this before it becomes a draft.",
+        suggestedParameters: { maxOpenPositions: 4 }
+      },
+      quantRationale: "Viewer audit rationale",
+      qualitativeEvidence: { links: [], quotes: [], signals: [] }
+    });
+
+    const started = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      broker: new StubBrokerAdapter(),
+      decisionLogStore,
+      runtimeControl,
+      strategyStore,
+      proposalsStore,
+      strategyChatStore: new InMemoryStrategyChatStore(),
+      strategyChatModel: new QueueReasoningModel([]),
+      sourcesStore,
+      env: {}
+    });
+    server = started.server;
+    baseUrl = started.baseUrl;
+    viewerToken = await authenticate(baseUrl, "family");
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("allows viewer reads on every family-readable portal GET", async () => {
+    const readableRoutes = [
+      "/portal/positions",
+      "/portal/decisions",
+      "/portal/strategies",
+      "/portal/roster",
+      "/portal/runtime",
+      "/portal/proposals"
+    ];
+
+    for (const route of readableRoutes) {
+      const response = await authenticatedRawRequest(baseUrl, route, "GET", viewerToken);
+      assert.equal(response.status, 200, route);
+      await response.json();
+    }
+  });
+
+  it("hides draft strategies from viewer strategy reads", async () => {
+    const response = await authenticatedRawRequest(baseUrl, "/portal/strategies", "GET", viewerToken);
+    const body = (await response.json()) as { strategies?: StrategyRecord[] };
+
+    assert.equal(response.status, 200);
+    assert.ok(body.strategies?.some((strategy) => strategy.id === approvedStrategyId));
+    assert.equal(body.strategies?.some((strategy) => strategy.id === draftStrategyId), false);
+    assert.equal(body.strategies?.some((strategy) => strategy.status === "draft"), false);
+  });
+
+  it("returns 403 to viewers for every admin-boundary route before reading mutation bodies", async () => {
+    const forbiddenBody = "not valid json";
+    const adminGatedRoutes: Array<{ method: "GET" | "POST" | "PATCH" | "DELETE"; path: string; label: string }> = [
+      { method: "GET", path: "/admin/roles", label: "admin role inspection" },
+      { method: "POST", path: "/portal/strategies", label: "strategy create" },
+      { method: "PATCH", path: `/portal/strategies/${strategyId}`, label: "strategy update" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/discuss`, label: "strategy transition discuss" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/return-to-draft`, label: "strategy transition return-to-draft" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/approve`, label: "strategy transition approve" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/activate`, label: "strategy transition activate" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/pause`, label: "strategy transition pause" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/resume`, label: "strategy transition resume" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/retire`, label: "strategy transition retire" },
+      { method: "POST", path: `/portal/strategies/${strategyId}/chat`, label: "strategy chat post" },
+      { method: "POST", path: "/portal/roster", label: "roster create" },
+      { method: "PATCH", path: `/portal/roster/${sourceId}`, label: "roster update" },
+      { method: "DELETE", path: `/portal/roster/${sourceId}`, label: "roster delete" },
+      { method: "POST", path: "/portal/runtime/start", label: "runtime start" },
+      { method: "POST", path: "/portal/runtime/stop", label: "runtime stop" },
+      { method: "POST", path: `/portal/proposals/${proposalId}/review`, label: "proposal review" }
+    ];
+
+    const strategyCallsBefore = strategyStore.calls.length;
+    const sourceCallsBefore = sourcesStore.calls.length;
+
+    for (const route of adminGatedRoutes) {
+      const response = await authenticatedRawRequest(
+        baseUrl,
+        route.path,
+        route.method,
+        viewerToken,
+        route.method === "GET" ? undefined : forbiddenBody
+      );
+
+      assert.equal(response.status, 403, route.label);
+      assert.deepEqual(await response.json(), { error: "forbidden" }, route.label);
+    }
+
+    assert.equal(strategyStore.calls.length, strategyCallsBefore);
+    assert.equal(sourcesStore.calls.length, sourceCallsBefore);
+    assert.equal(runtimeControl.starts, 0);
+    assert.equal(runtimeControl.stops, 0);
+    assert.equal((await proposalsStore.listPending()).some((proposal) => proposal.id === proposalId), true);
   });
 });
 

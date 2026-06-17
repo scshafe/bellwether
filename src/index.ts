@@ -5,8 +5,8 @@ import {
 } from "./broker.js";
 import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./agent-team.js";
 import { createPool } from "./db.js";
-import { InMemoryIdentityProvider, type InMemoryIdentityRecord, type Role } from "./identity.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
+import { createIdentityProvider } from "./portal-identity.js";
 import { ensureQualitativeItemsSchema, ensureSourcesSchema, PostgresSourcesStore } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
@@ -58,23 +58,3 @@ process.on("SIGTERM", () => {
 server.listen(endpoints.port, endpoints.host, () => {
   console.log(`agent-trading-platform server listening on ${endpoints.publicBaseUrl}`);
 });
-
-function createIdentityProvider(config: NodeJS.ProcessEnv): InMemoryIdentityProvider {
-  const adminUser: InMemoryIdentityRecord = {
-    id: config.PORTAL_ADMIN_ID ?? "portal-admin",
-    username: config.PORTAL_ADMIN_USERNAME ?? "admin",
-    displayName: config.PORTAL_ADMIN_DISPLAY_NAME ?? "Administrator",
-    role: parseRole(config.PORTAL_ADMIN_ROLE ?? "admin"),
-    password: config.PORTAL_ADMIN_PASSWORD ?? "change-me"
-  };
-
-  return new InMemoryIdentityProvider([adminUser]);
-}
-
-function parseRole(value: string): Role {
-  if (value === "admin" || value === "manager" || value === "viewer") {
-    return value;
-  }
-
-  throw new Error(`unknown PORTAL_ADMIN_ROLE ${value}`);
-}
