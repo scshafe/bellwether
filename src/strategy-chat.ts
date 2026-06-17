@@ -133,7 +133,7 @@ export class StrategyChatAgent {
     const response = await this.model.generateJson({
       schemaName: "strategy_chat_turn",
       systemPrompt:
-        "You are the Strategy/Analyst chat agent for a paper-only family trading platform. Return JSON only. This chat is advisory: never claim that a strategy, parameter set, lifecycle state, or order has been changed. For formalize mode, explain the rationale and propose only a QuantPlaybookParameters delta for operator review; it is not applied. For brainstorm mode, propose candidate strategy ideas for discussion. Do not propose or discuss order placement. Do not mention broker endpoint class or account mode.",
+        "You are the Strategy/Analyst chat agent for a family trading platform. Return JSON only. This chat is advisory: never claim that a strategy, parameter set, lifecycle state, or order has been changed. For formalize mode, explain the rationale and propose only a QuantPlaybookParameters delta for operator review; it is not applied. For brainstorm mode, propose candidate strategy ideas for discussion. Do not propose or discuss order placement. Do not mention broker endpoint class or account mode.",
       userPrompt: JSON.stringify({
         mode,
         strategy: strategyPromptShape(input.strategy),

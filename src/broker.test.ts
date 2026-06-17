@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import {
   ALPACA_PAPER_BROKER_ACCOUNT_ID,
+  AlpacaLiveAdapter,
   AlpacaPaperAdapter,
   BrokerOrderRejectedError,
   createAlpacaPaperSecretsStore
@@ -413,5 +414,27 @@ describe("AlpacaPaperAdapter", () => {
       keyId: "file-key",
       secretKey: "file-secret"
     });
+  });
+});
+
+describe("AlpacaLiveAdapter", () => {
+  it("throws on construction unless the flip guard is affirmed", () => {
+    assert.throws(
+      () => new AlpacaLiveAdapter(testVault(), "alpaca-live"),
+      /live adapter disabled/u
+    );
+  });
+
+  it("is a refusing design-only stub for every broker method", async () => {
+    const adapter = new AlpacaLiveAdapter(testVault(), "alpaca-live", { flipGuard: { affirmed: true } });
+
+    await assert.rejects(() => adapter.getAccount(), /not implemented — real-money path is DESIGN-only/u);
+    await assert.rejects(() => adapter.getPositions(), /not implemented — real-money path is DESIGN-only/u);
+    await assert.rejects(
+      () => adapter.placeOrder({ symbol: "AAPL", qty: 1, side: "buy", type: "limit", timeInForce: "day", limitPrice: 100 }),
+      /not implemented — real-money path is DESIGN-only/u
+    );
+    await assert.rejects(() => adapter.cancelOrder("order-1"), /not implemented — real-money path is DESIGN-only/u);
+    await assert.rejects(() => adapter.streamFills()[Symbol.asyncIterator]().next(), /not implemented — real-money path is DESIGN-only/u);
   });
 });

@@ -4,7 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
 
-import { createXApiSecretsStore, InMemorySecretsStore, SecretsBackedBrokerCredentialVault, SecretsBackedXApiCredentialVault } from "./secrets.js";
+import {
+  ALPACA_LIVE_BROKER_ACCOUNT_ID,
+  createAlpacaLiveSecretsStore,
+  createXApiSecretsStore,
+  InMemorySecretsStore,
+  SecretsBackedBrokerCredentialVault,
+  SecretsBackedXApiCredentialVault
+} from "./secrets.js";
 
 describe("InMemorySecretsStore", () => {
   it("stores and reads secrets by name", async () => {
@@ -67,5 +74,22 @@ describe("SecretsBackedXApiCredentialVault", () => {
 
     assert.deepEqual(await new SecretsBackedXApiCredentialVault(present).getXApiCredential(), { bearerToken: "placeholder-file-token" });
     assert.equal(await new SecretsBackedXApiCredentialVault(missing).getXApiCredential(), null);
+  });
+});
+
+describe("createAlpacaLiveSecretsStore", () => {
+  it("loads mounted live credentials into a separate broker namespace and treats an absent file as no credential", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bellwether-alpaca-live-"));
+    const filePath = join(directory, "alpaca-live.env");
+    await writeFile(filePath, "ALPACA_LIVE_KEY_ID=live-key\nALPACA_LIVE_SECRET_KEY='live-secret'\n", "utf8");
+
+    const present = await createAlpacaLiveSecretsStore({ filePath });
+    const missing = await createAlpacaLiveSecretsStore({ filePath: join(directory, "missing.env") });
+
+    assert.deepEqual(await new SecretsBackedBrokerCredentialVault(present).getBrokerCredential(ALPACA_LIVE_BROKER_ACCOUNT_ID), {
+      keyId: "live-key",
+      secretKey: "live-secret"
+    });
+    assert.equal(await new SecretsBackedBrokerCredentialVault(missing).getBrokerCredential(ALPACA_LIVE_BROKER_ACCOUNT_ID), null);
   });
 });

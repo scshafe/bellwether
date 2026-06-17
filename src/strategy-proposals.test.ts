@@ -175,7 +175,7 @@ describe("strategy proposal agent", () => {
     assert.equal(model.requests[0]?.schemaName, "strategy_proposal_candidate");
     assert.match(model.requests[0]?.systemPrompt ?? "", /never claim that a strategy, parameter set, lifecycle state, or order has been changed/u);
     assert.match(model.requests[0]?.systemPrompt ?? "", /Do not propose or discuss order placement/u);
-    assert.equal(JSON.stringify(model.requests).includes("paper"), false);
+    assert.equal(/\b(paper|live)\b/iu.test(JSON.stringify(model.requests)), false);
   });
 
   it("rejects invalid candidate parameters before persistence", async () => {

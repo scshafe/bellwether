@@ -90,6 +90,12 @@ export type AlpacaPaperAdapterOptions = {
   strategyGate?: StrategyTradingGate;
 };
 
+export type AlpacaLiveAdapterOptions = AlpacaPaperAdapterOptions & {
+  flipGuard?: { affirmed: boolean };
+};
+
+const alpacaLiveBaseUrlTodo = "TODO: real-money endpoint intentionally not wired";
+
 export class BrokerOrderRejectedError extends Error {
   constructor(message: string) {
     super(message);
@@ -267,6 +273,44 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
       throw new BrokerOrderRejectedError(violation);
     }
   }
+}
+
+export class AlpacaLiveAdapter implements BrokerAdapter {
+  constructor(
+    _credentialVault: BrokerCredentialVault,
+    _brokerAccountId: string,
+    options: AlpacaLiveAdapterOptions = {}
+  ) {
+    void alpacaLiveBaseUrlTodo;
+
+    if (!options.flipGuard?.affirmed) {
+      throw new Error("live adapter disabled: flip guard was not affirmed");
+    }
+  }
+
+  async getAccount(): Promise<BrokerAccount> {
+    throw liveDesignOnlyError();
+  }
+
+  async getPositions(): Promise<BrokerPosition[]> {
+    throw liveDesignOnlyError();
+  }
+
+  async placeOrder(_order: BrokerOrderRequest): Promise<BrokerOrder> {
+    throw liveDesignOnlyError();
+  }
+
+  async cancelOrder(_orderId: string): Promise<void> {
+    throw liveDesignOnlyError();
+  }
+
+  async *streamFills(_options: BrokerFillStreamOptions = {}): AsyncIterable<BrokerFill> {
+    throw liveDesignOnlyError();
+  }
+}
+
+function liveDesignOnlyError(): Error {
+  return new Error("not implemented — real-money path is DESIGN-only");
 }
 
 export type AlpacaPaperSecretsStoreOptions = {

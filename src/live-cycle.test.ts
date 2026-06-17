@@ -142,7 +142,7 @@ describe("live trade cycle composition root", () => {
     const decisionLogStore = new InMemoryAgentDecisionLogStore();
 
     const result = await runLiveTradeCycle({
-      cycleId: "live-a-test",
+      cycleId: "cycle-a-test",
       now: () => new Date("2026-06-17T14:30:00Z"),
       marketDataClient: marketData,
       broker,
@@ -152,7 +152,7 @@ describe("live trade cycle composition root", () => {
     });
 
     assert.equal(result.execution.decision, "placed");
-    assert.equal(result.execution.order?.clientOrderId, "atp-live-a-test");
+    assert.equal(result.execution.order?.clientOrderId, "atp-cycle-a-test");
     assert.equal(result.quantSignal.symbol, "AAPL");
     assert.equal(result.risk.verdict, "approved");
     assert.equal(result.strategy.status, "active");
@@ -178,7 +178,7 @@ describe("live trade cycle composition root", () => {
     assert.equal(model.requests[1]?.schemaName, "strategy_analyst_decision");
     assert.match(model.requests[1]?.userPrompt ?? "", /qualitativeBrief/u);
     assert.match(model.requests[1]?.userPrompt ?? "", /AAPL momentum improved/u);
-    assert.equal(JSON.stringify(model.requests).includes("paper"), false);
+    assert.equal(/\b(paper|live)\b/iu.test(JSON.stringify(model.requests)), false);
   });
 });
 

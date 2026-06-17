@@ -35,6 +35,8 @@ export type XApiCredential = {
 };
 
 export const X_API_CREDENTIAL_FILE = "/srv/bellwether/x-api.env";
+export const ALPACA_LIVE_CREDENTIAL_FILE = "/srv/bellwether/alpaca-live.env";
+export const ALPACA_LIVE_BROKER_ACCOUNT_ID = "alpaca-live";
 
 export interface BrokerCredentialVault {
   getBrokerCredential(brokerAccountId: string): Promise<BrokerCredential | null>;
@@ -86,6 +88,12 @@ export type XApiSecretsStoreOptions = {
   secretsStore?: SecretsStore;
 };
 
+export type AlpacaLiveSecretsStoreOptions = {
+  filePath?: string;
+  brokerAccountId?: string;
+  secretsStore?: SecretsStore;
+};
+
 export async function createXApiSecretsStore(options: XApiSecretsStoreOptions = {}): Promise<SecretsStore> {
   const filePath = options.filePath ?? process.env.X_API_CREDENTIAL_FILE ?? X_API_CREDENTIAL_FILE;
   const accountId = options.accountId ?? "default";
@@ -106,6 +114,32 @@ export async function createXApiSecretsStore(options: XApiSecretsStoreOptions = 
   const bearerToken = requireConfigValue(config, "X_BEARER_TOKEN");
 
   await secretsStore.setSecret(`x-api-credentials/${accountId}/bearer-token`, bearerToken);
+  return secretsStore;
+}
+
+export async function createAlpacaLiveSecretsStore(options: AlpacaLiveSecretsStoreOptions = {}): Promise<SecretsStore> {
+  const filePath = options.filePath ?? process.env.ALPACA_LIVE_CREDENTIAL_FILE ?? ALPACA_LIVE_CREDENTIAL_FILE;
+  const brokerAccountId = options.brokerAccountId ?? ALPACA_LIVE_BROKER_ACCOUNT_ID;
+  const secretsStore = options.secretsStore ?? new InMemorySecretsStore();
+  let raw: string;
+
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch (error: unknown) {
+    if (isMissingFileError(error)) {
+      return secretsStore;
+    }
+
+    throw error;
+  }
+
+  const config = parseEnvFile(raw);
+  const keyId = requireConfigValue(config, "ALPACA_LIVE_KEY_ID");
+  const secretKey = requireConfigValue(config, "ALPACA_LIVE_SECRET_KEY");
+
+  await secretsStore.setSecret(`broker-credentials/${brokerAccountId}/key-id`, keyId);
+  await secretsStore.setSecret(`broker-credentials/${brokerAccountId}/secret-key`, secretKey);
+
   return secretsStore;
 }
 

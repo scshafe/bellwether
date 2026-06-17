@@ -1,11 +1,11 @@
 import {
   ALPACA_PAPER_BROKER_ACCOUNT_ID,
-  AlpacaPaperAdapter,
   createAlpacaPaperSecretsStore,
   type BrokerAccount,
   type BrokerAdapter,
   type BrokerPosition
 } from "./broker.js";
+import { createBrokerAdapter, paperFlipState } from "./broker-flip.js";
 import {
   ensureAgentDecisionLogSchema,
   PostgresAgentDecisionLogStore,
@@ -95,7 +95,7 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
     const marketDataClient = options.marketDataClient ?? new AlpacaIexMarketDataClient(requiredBrokerCredentialVault(brokerCredentialVault), { fetchFn: options.fetchFn });
     const strategyStore = options.strategyStore ?? new InMemoryStrategyStore();
     let playbook: QuantPlaybook | null = null;
-    const broker = options.broker ?? new AlpacaPaperAdapter(requiredBrokerCredentialVault(brokerCredentialVault), ALPACA_PAPER_BROKER_ACCOUNT_ID, {
+    const broker = options.broker ?? await createBrokerAdapter(requiredBrokerCredentialVault(brokerCredentialVault), ALPACA_PAPER_BROKER_ACCOUNT_ID, paperFlipState(), {
       fetchFn: options.fetchFn,
       strategyGate: strategyStore,
       orderGuardRails: () => {
@@ -167,7 +167,7 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
 }
 
 function defaultLiveCycleId(now: Date): string {
-  return `live-a-${formatIsoDate(now)}`;
+  return `cycle-a-${formatIsoDate(now)}`;
 }
 
 function withLiveCycleSchemaHints(model: ReasoningModel): ReasoningModel {
@@ -221,9 +221,9 @@ async function createActiveLiveStrategy(
 ): Promise<StrategyRecord> {
   const strategy = await strategyStore.createStrategy({
     id: liveCycleStrategyId,
-    name: "Live-A one-share momentum",
+    name: "Cycle-A one-share momentum",
     description:
-      "Pre-approved live-A strategy: choose the top deterministic candidate, propose exactly 1 share, and use a limit price no higher than candidate sizing.maxNotional.",
+      "Pre-approved cycle-A strategy: choose the top deterministic candidate, propose exactly 1 share, and use a limit price no higher than candidate sizing.maxNotional.",
     parameters
   });
 

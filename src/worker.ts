@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { Pool } from "pg";
 
 import { runAlpacaNewsIngestStream } from "./alpaca-news.js";
+import { ensureBrokerFlipLogSchema } from "./broker-flip.js";
 import { createAlpacaPaperSecretsStore } from "./broker.js";
 import { isFeatureEnabled } from "./config.js";
 import { createPool } from "./db.js";
@@ -82,6 +83,7 @@ export async function runWorker(): Promise<void> {
     await ensureSourcesSchema(pool);
     await ensureQualitativeItemsSchema(pool);
     await ensureStrategyProposalsSchema(pool);
+    await ensureBrokerFlipLogSchema(pool);
     await ensureAlpacaNewsSource(pool);
     const sourcesStore = new PostgresSourcesStore(pool);
     const itemsStore = new PostgresQualitativeItemsStore(pool);
