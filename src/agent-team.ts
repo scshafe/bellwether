@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import type { Pool } from "pg";
 
@@ -73,6 +74,7 @@ export type AgentDecisionLogEntry = Required<Pick<AgentDecisionLogInput, "id" | 
 export interface AgentDecisionLogStore {
   recordDecision(entry: AgentDecisionLogInput): Promise<AgentDecisionLogEntry>;
   getDecision(id: string): Promise<AgentDecisionLogEntry | null>;
+  listDecisions(limit?: number): Promise<AgentDecisionLogEntry[]>;
 }
 
 export class InMemoryAgentDecisionLogStore implements AgentDecisionLogStore {
@@ -87,6 +89,13 @@ export class InMemoryAgentDecisionLogStore implements AgentDecisionLogStore {
   async getDecision(id: string): Promise<AgentDecisionLogEntry | null> {
     const entry = this.entries.get(id.trim());
     return entry ? cloneDecisionLogEntry(entry) : null;
+  }
+
+  async listDecisions(limit = 50): Promise<AgentDecisionLogEntry[]> {
+    return [...this.entries.values()]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, normalizeDecisionLogLimit(limit))
+      .map((entry) => cloneDecisionLogEntry(entry));
   }
 }
 
@@ -132,22 +141,24 @@ export class PostgresAgentDecisionLogStore implements AgentDecisionLogStore {
 
     return result.rows[0] ? rowToDecisionLogEntry(result.rows[0]) : null;
   }
+
+  async listDecisions(limit = 50): Promise<AgentDecisionLogEntry[]> {
+    const result = await this.pool.query<AgentDecisionLogRow>(
+      `
+        SELECT id, cycle_id, strategy_id, created_at, quant_signal, broker_snapshot, strategy_analyst, risk, execution
+        FROM agent_decision_logs
+        ORDER BY created_at DESC
+        LIMIT $1
+      `,
+      [normalizeDecisionLogLimit(limit)]
+    );
+
+    return result.rows.map(rowToDecisionLogEntry);
+  }
 }
 
 export async function ensureAgentDecisionLogSchema(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS agent_decision_logs (
-      id uuid PRIMARY KEY,
-      cycle_id text NOT NULL UNIQUE,
-      strategy_id uuid NOT NULL,
-      created_at timestamptz NOT NULL,
-      quant_signal jsonb NOT NULL,
-      broker_snapshot jsonb NOT NULL,
-      strategy_analyst jsonb NOT NULL,
-      risk jsonb NOT NULL,
-      execution jsonb NOT NULL
-    )
-  `);
+  await pool.query(await readFile(new URL("../db/bootstrap/003_agent_decision_logs.sql", import.meta.url), "utf8"));
 }
 
 export class StrategyAnalystAgent {
@@ -356,6 +367,14 @@ function normalizeDecisionLogInput(entry: AgentDecisionLogInput): AgentDecisionL
     risk: cloneJson(entry.risk),
     execution: cloneJson(entry.execution)
   };
+}
+
+function normalizeDecisionLogLimit(limit: number): number {
+  if (!Number.isFinite(limit)) {
+    return 50;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), 100);
 }
 
 function cloneDecisionLogEntry(entry: AgentDecisionLogEntry): AgentDecisionLogEntry {

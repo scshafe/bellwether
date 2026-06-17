@@ -56,7 +56,10 @@ class RecordingBrokerAdapter implements BrokerAdapter {
       currency: "USD",
       cash: "5000",
       buyingPower: "10000",
-      portfolioValue: "20000"
+      portfolioValue: "20000",
+      equity: "20025",
+      lastEquity: "20000",
+      dailyPnl: "25"
     };
   }
 
@@ -142,11 +145,14 @@ describe("live trade cycle composition root", () => {
 describe("live trade cycle integration", async () => {
   const hasBrokerCredential = await fileExists(ALPACA_PAPER_CREDENTIAL_FILE);
   const hasOauthCredential = await fileExists(LLM_OAUTH_CREDENTIAL_FILE);
+  const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
   const skipReason = !hasBrokerCredential
     ? `${ALPACA_PAPER_CREDENTIAL_FILE} is not mounted`
     : !hasOauthCredential
       ? `${LLM_OAUTH_CREDENTIAL_FILE} is not mounted`
-      : false;
+      : !hasDatabaseUrl
+        ? "DATABASE_URL is not configured"
+        : false;
 
   it(
     "runs one real OpenAI-OAuth reasoned cycle into one Alpaca paper order when credentials are mounted",

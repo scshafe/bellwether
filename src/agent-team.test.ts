@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Pool } from "pg";
 
 import { AlpacaPaperAdapter } from "./broker.js";
 import {
+  ensureAgentDecisionLogSchema,
   ExecutionAgent,
   InMemoryAgentDecisionLogStore,
+  PostgresAgentDecisionLogStore,
   runMinimalAgentTeamTrade,
   type RiskAgentDecision
 } from "./agent-team.js";
@@ -121,7 +124,9 @@ describe("minimal agent team trade", () => {
             currency: "USD",
             cash: "5000",
             buying_power: "10000",
-            portfolio_value: "20000"
+            portfolio_value: "20000",
+            equity: "20050",
+            last_equity: "20000"
           });
         }
 
@@ -259,5 +264,93 @@ describe("minimal agent team trade", () => {
     assert.equal(draftResult.decision, "rejected");
     assert.match(draftResult.brokerRejection ?? "", /only active strategies can trade/u);
     assert.equal(fetchCalls, 0);
+  });
+});
+
+describe("Postgres agent decision log store", () => {
+  it("records and lists glass-box decisions through the shared SQL-backed schema", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const row = {
+      id: "55555555-5555-4555-8555-555555555555",
+      cycle_id: "cycle-persisted",
+      strategy_id: "33333333-3333-3333-8333-333333333333",
+      created_at: "2026-06-17T13:00:00.000Z",
+      quant_signal: {
+        asOf: "2026-06-17T13:00:00.000Z",
+        symbol: "AAPL",
+        score: 0.9,
+        signals: { momentumFraction: 0.9, volatilityFraction: 0.1, averageDollarVolume: 1_000_000, score: 0.9 },
+        sizing: { maxQty: 1, maxNotional: 195 }
+      },
+      broker_snapshot: {
+        account: {
+          id: "account-1",
+          status: "ACTIVE",
+          currency: "USD",
+          cash: "5000",
+          buyingPower: "10000",
+          portfolioValue: "20000",
+          equity: "20025",
+          lastEquity: "20000",
+          dailyPnl: "25"
+        },
+        positions: []
+      },
+      strategy_analyst: {
+        thesis: "Persisted thesis",
+        proposedOrder: {
+          symbol: "AAPL",
+          qty: 1,
+          side: "buy" as const,
+          type: "limit" as const,
+          timeInForce: "day" as const,
+          limitPrice: 195,
+          estimatedNotional: 195,
+          strategyId: "33333333-3333-3333-8333-333333333333"
+        }
+      },
+      risk: { approved: true, verdict: "approved" as const, rationale: "Persisted risk", deterministicViolations: [] as string[] },
+      execution: { decision: "skipped" as const, rationale: "Persisted execution" }
+    };
+    const pool = {
+      query: async (text: string, values?: unknown[]) => {
+        queries.push({ text, values });
+
+        if (text.includes("INSERT INTO agent_decision_logs")) {
+          return { rows: [row] };
+        }
+
+        if (text.includes("ORDER BY created_at DESC")) {
+          return { rows: [row] };
+        }
+
+        return { rows: [] };
+      }
+    } as unknown as Pool;
+    const store = new PostgresAgentDecisionLogStore(pool);
+
+    await ensureAgentDecisionLogSchema(pool);
+    const recorded = await store.recordDecision({
+      id: row.id,
+      cycleId: row.cycle_id,
+      strategyId: row.strategy_id,
+      createdAt: row.created_at,
+      quantSignal: row.quant_signal,
+      brokerSnapshot: row.broker_snapshot,
+      strategyAnalyst: row.strategy_analyst,
+      risk: row.risk,
+      execution: row.execution
+    });
+    const listed = await store.listDecisions(1);
+
+    assert.match(queries[0]?.text ?? "", /CREATE TABLE IF NOT EXISTS agent_decision_logs/u);
+    assert.match(queries[0]?.text ?? "", /cycle_id text NOT NULL UNIQUE/u);
+    assert.match(queries[1]?.text ?? "", /INSERT INTO agent_decision_logs/u);
+    assert.equal(queries[1]?.values?.[0], row.id);
+    assert.match(queries[2]?.text ?? "", /ORDER BY created_at DESC/u);
+    assert.deepEqual(queries[2]?.values, [1]);
+    assert.equal(recorded.id, row.id);
+    assert.equal(listed[0]?.id, row.id);
+    assert.equal(listed[0]?.strategyAnalyst.thesis, "Persisted thesis");
   });
 });

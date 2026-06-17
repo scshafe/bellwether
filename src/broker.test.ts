@@ -47,7 +47,9 @@ describe("AlpacaPaperAdapter", () => {
           currency: "USD",
           cash: "100000",
           buying_power: "200000",
-          portfolio_value: "100000"
+          portfolio_value: "100000",
+          equity: "100010.25",
+          last_equity: "100000.00"
         });
       }
     });
@@ -58,7 +60,10 @@ describe("AlpacaPaperAdapter", () => {
       currency: "USD",
       cash: "100000",
       buyingPower: "200000",
-      portfolioValue: "100000"
+      portfolioValue: "100000",
+      equity: "100010.25",
+      lastEquity: "100000.00",
+      dailyPnl: "10.25"
     });
     assert.equal(calls[0]?.url, "https://paper-api.alpaca.markets/v2/account");
     assert.equal((calls[0]?.init.headers as Record<string, string>)["APCA-API-KEY-ID"], "test-key-id");
@@ -72,7 +77,9 @@ describe("AlpacaPaperAdapter", () => {
             symbol: "AAPL",
             qty: "1",
             market_value: "195.00",
-            avg_entry_price: "190.00"
+            avg_entry_price: "190.00",
+            unrealized_pl: "5.00",
+            unrealized_plpc: "0.0263"
           }
         ])
     });
@@ -82,7 +89,9 @@ describe("AlpacaPaperAdapter", () => {
         symbol: "AAPL",
         qty: "1",
         marketValue: "195.00",
-        avgEntryPrice: "190.00"
+        avgEntryPrice: "190.00",
+        unrealizedPl: "5.00",
+        unrealizedPlpc: "0.0263"
       }
     ]);
   });

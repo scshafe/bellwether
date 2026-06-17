@@ -9,10 +9,14 @@ import {
   type IdentityProvider,
   type Role
 } from "./identity.js";
+import type { AgentDecisionLogStore } from "./agent-team.js";
+import type { BrokerAdapter } from "./broker.js";
 
 export type ServerOptions = {
   databaseUrl?: string;
   identityProvider?: IdentityProvider;
+  broker?: BrokerAdapter;
+  decisionLogStore?: AgentDecisionLogStore;
 };
 
 export async function handleRequest(
@@ -20,17 +24,19 @@ export async function handleRequest(
   response: ServerResponse,
   options: ServerOptions = {}
 ): Promise<void> {
-  if (request.method === "GET" && request.url === "/healthz") {
+  const url = new URL(request.url ?? "/", "http://localhost");
+
+  if (request.method === "GET" && url.pathname === "/healthz") {
     writeJson(response, 200, options.databaseUrl ? { ok: true, databaseConfigured: true } : { ok: true });
     return;
   }
 
-  if (request.method === "POST" && request.url === "/auth/session") {
+  if (request.method === "POST" && url.pathname === "/auth/session") {
     await handleSessionCreate(request, response, options.identityProvider);
     return;
   }
 
-  if (request.method === "GET" && request.url === "/admin/roles") {
+  if (request.method === "GET" && url.pathname === "/admin/roles") {
     const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
 
     if (!user) {
@@ -41,7 +47,7 @@ export async function handleRequest(
     return;
   }
 
-  if (request.method === "GET" && request.url === "/family/overview") {
+  if (request.method === "GET" && url.pathname === "/family/overview") {
     const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
 
     if (!user) {
@@ -49,6 +55,28 @@ export async function handleRequest(
     }
 
     writeJson(response, 200, { ok: true, user });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/portal/positions") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handlePortalPositions(response, options.broker);
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/portal/decisions") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handlePortalDecisions(response, options.decisionLogStore, parseDecisionLimit(url));
     return;
   }
 
@@ -89,6 +117,29 @@ async function handleSessionCreate(
   }
 
   writeJson(response, 200, session);
+}
+
+async function handlePortalPositions(response: ServerResponse, broker?: BrokerAdapter): Promise<void> {
+  if (!broker) {
+    writeJson(response, 503, { error: "broker_unavailable" });
+    return;
+  }
+
+  const [account, positions] = await Promise.all([broker.getAccount(), broker.getPositions()]);
+  writeJson(response, 200, { account, positions });
+}
+
+async function handlePortalDecisions(
+  response: ServerResponse,
+  decisionLogStore: AgentDecisionLogStore | undefined,
+  limit: number
+): Promise<void> {
+  if (!decisionLogStore) {
+    writeJson(response, 503, { error: "decision_log_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, { decisions: await decisionLogStore.listDecisions(limit), limit });
 }
 
 async function requireRole(
@@ -136,6 +187,22 @@ function getBearerToken(authorization: string | string[] | undefined): string | 
   }
 
   return token;
+}
+
+function parseDecisionLimit(url: URL): number {
+  const rawLimit = url.searchParams.get("limit");
+
+  if (!rawLimit) {
+    return 50;
+  }
+
+  const parsed = Number(rawLimit);
+
+  if (!Number.isFinite(parsed)) {
+    return 50;
+  }
+
+  return Math.min(Math.max(Math.trunc(parsed), 1), 100);
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

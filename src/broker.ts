@@ -19,6 +19,9 @@ export type BrokerAccount = {
   cash: string;
   buyingPower: string;
   portfolioValue: string;
+  equity: string;
+  lastEquity: string;
+  dailyPnl: string;
 };
 
 export type BrokerPosition = {
@@ -26,6 +29,8 @@ export type BrokerPosition = {
   qty: string;
   marketValue: string;
   avgEntryPrice: string;
+  unrealizedPl: string;
+  unrealizedPlpc?: string;
 };
 
 export type BrokerOrderSide = "buy" | "sell";
@@ -113,13 +118,19 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
     const body = await this.request("/v2/account", { method: "GET" });
     const account = objectBody(body, "Alpaca account response");
 
+    const equity = stringField(account, "equity");
+    const lastEquity = stringField(account, "last_equity");
+
     return {
       id: stringField(account, "id"),
       status: stringField(account, "status"),
       currency: stringField(account, "currency"),
       cash: stringField(account, "cash"),
       buyingPower: stringField(account, "buying_power"),
-      portfolioValue: stringField(account, "portfolio_value")
+      portfolioValue: stringField(account, "portfolio_value"),
+      equity,
+      lastEquity,
+      dailyPnl: decimalDifferenceString(equity, lastEquity, "dailyPnl")
     };
   }
 
@@ -133,12 +144,20 @@ export class AlpacaPaperAdapter implements BrokerAdapter {
     return body.map((position) => {
       const record = objectBody(position, "Alpaca position response");
 
-      return {
+      const parsed: BrokerPosition = {
         symbol: stringField(record, "symbol"),
         qty: stringField(record, "qty"),
         marketValue: stringField(record, "market_value"),
-        avgEntryPrice: stringField(record, "avg_entry_price")
+        avgEntryPrice: stringField(record, "avg_entry_price"),
+        unrealizedPl: stringField(record, "unrealized_pl")
       };
+      const unrealizedPlpc = optionalStringField(record, "unrealized_plpc");
+
+      if (unrealizedPlpc !== undefined) {
+        parsed.unrealizedPlpc = unrealizedPlpc;
+      }
+
+      return parsed;
     });
   }
 
@@ -424,6 +443,17 @@ function optionalStringField(record: Record<string, unknown>, name: string): str
   }
 
   return value;
+}
+
+function decimalDifferenceString(left: string, right: string, name: string): string {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+
+  if (!Number.isFinite(leftNumber) || !Number.isFinite(rightNumber)) {
+    throw new Error(`${name} inputs must be numeric strings`);
+  }
+
+  return String(leftNumber - rightNumber);
 }
 
 function brokerSide(record: Record<string, unknown>, name: string): BrokerOrderSide {

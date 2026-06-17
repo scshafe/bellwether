@@ -7,11 +7,14 @@ import {
   type BrokerPosition
 } from "./broker.js";
 import {
-  InMemoryAgentDecisionLogStore,
+  ensureAgentDecisionLogSchema,
+  PostgresAgentDecisionLogStore,
   runMinimalAgentTeamTrade,
   type AgentDecisionLogStore,
   type AgentTeamTradeCycleResult
 } from "./agent-team.js";
+import type { Pool } from "pg";
+import { createPool } from "./db.js";
 import {
   AlpacaIexMarketDataClient,
   type MarketDataClient
@@ -55,6 +58,8 @@ export type RunLiveTradeCycleOptions = {
   broker?: BrokerAdapter;
   model?: ReasoningModel;
   decisionLogStore?: AgentDecisionLogStore;
+  pool?: Pool;
+  databaseUrl?: string;
   strategyStore?: LiveTradeCycleStrategyStore;
   brokerCredentialFile?: string;
   oauthCredentialFile?: string;
@@ -71,64 +76,78 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
   const now = options.now?.() ?? new Date();
   const cycleId = options.cycleId ?? defaultLiveCycleId(now);
   const universe = options.universe ?? liveCycleUniverse;
-  const brokerCredentialVault = options.marketDataClient && options.broker
-    ? null
-    : new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore({ filePath: options.brokerCredentialFile }));
-  const marketDataClient = options.marketDataClient ?? new AlpacaIexMarketDataClient(requiredBrokerCredentialVault(brokerCredentialVault), { fetchFn: options.fetchFn });
-  const strategyStore = options.strategyStore ?? new InMemoryStrategyStore();
-  let playbook: QuantPlaybook | null = null;
-  const broker = options.broker ?? new AlpacaPaperAdapter(requiredBrokerCredentialVault(brokerCredentialVault), ALPACA_PAPER_BROKER_ACCOUNT_ID, {
-    fetchFn: options.fetchFn,
-    strategyGate: strategyStore,
-    orderGuardRails: () => {
-      if (!playbook) {
-        throw new Error("live trade cycle guard rails are not ready");
-      }
+  const pool = options.decisionLogStore ? null : options.pool ?? createPool(options.databaseUrl);
+  const shouldClosePool = Boolean(pool && !options.pool);
 
-      return playbook.rails;
+  try {
+    if (pool) {
+      await ensureAgentDecisionLogSchema(pool);
     }
-  });
-  const account = await broker.getAccount();
-  const positions = await broker.getPositions();
-  const portfolio = brokerSnapshotToPortfolio(account, positions, universe);
-  const bars = await marketDataClient.getDailyBars(universe.map((asset) => asset.symbol), {
-    start: formatIsoDate(new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000)),
-    end: formatIsoDate(now),
-    limit: 20
-  });
-  const strategy = await createActiveLiveStrategy(strategyStore, buildLiveCycleParameters(universe, bars));
-  playbook = buildStrategyQuantPlaybook(strategy, {
-    asOf: now.toISOString(),
-    universe,
-    bars,
-    portfolio
-  });
 
-  if (playbook.candidates.length === 0) {
-    throw new Error("live trade cycle requires at least one quant candidate from live market data");
+    const brokerCredentialVault = options.marketDataClient && options.broker
+      ? null
+      : new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore({ filePath: options.brokerCredentialFile }));
+    const marketDataClient = options.marketDataClient ?? new AlpacaIexMarketDataClient(requiredBrokerCredentialVault(brokerCredentialVault), { fetchFn: options.fetchFn });
+    const strategyStore = options.strategyStore ?? new InMemoryStrategyStore();
+    let playbook: QuantPlaybook | null = null;
+    const broker = options.broker ?? new AlpacaPaperAdapter(requiredBrokerCredentialVault(brokerCredentialVault), ALPACA_PAPER_BROKER_ACCOUNT_ID, {
+      fetchFn: options.fetchFn,
+      strategyGate: strategyStore,
+      orderGuardRails: () => {
+        if (!playbook) {
+          throw new Error("live trade cycle guard rails are not ready");
+        }
+
+        return playbook.rails;
+      }
+    });
+    const account = await broker.getAccount();
+    const positions = await broker.getPositions();
+    const portfolio = brokerSnapshotToPortfolio(account, positions, universe);
+    const bars = await marketDataClient.getDailyBars(universe.map((asset) => asset.symbol), {
+      start: formatIsoDate(new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000)),
+      end: formatIsoDate(now),
+      limit: 20
+    });
+    const strategy = await createActiveLiveStrategy(strategyStore, buildLiveCycleParameters(universe, bars));
+    playbook = buildStrategyQuantPlaybook(strategy, {
+      asOf: now.toISOString(),
+      universe,
+      bars,
+      portfolio
+    });
+
+    if (playbook.candidates.length === 0) {
+      throw new Error("live trade cycle requires at least one quant candidate from live market data");
+    }
+
+    const model = options.model ?? withLiveCycleSchemaHints(createReasoningModel(
+      new SecretsBackedLlmCredentialVault(await createOpenAiOAuthSecretsStore({ filePath: options.oauthCredentialFile })),
+      { providerId: OPENAI_OAUTH_PROVIDER_ID, fetchFn: options.fetchFn }
+    ));
+
+    const decisionLogStore = options.decisionLogStore ?? new PostgresAgentDecisionLogStore(requiredPool(pool));
+    const result = await runMinimalAgentTeamTrade({
+      strategy,
+      playbook,
+      portfolio,
+      broker,
+      model,
+      decisionLogStore,
+      cycleId
+    });
+
+    return {
+      ...result,
+      strategy,
+      playbook,
+      portfolio
+    };
+  } finally {
+    if (shouldClosePool) {
+      await pool?.end();
+    }
   }
-
-  const model = options.model ?? withLiveCycleSchemaHints(createReasoningModel(
-    new SecretsBackedLlmCredentialVault(await createOpenAiOAuthSecretsStore({ filePath: options.oauthCredentialFile })),
-    { providerId: OPENAI_OAUTH_PROVIDER_ID, fetchFn: options.fetchFn }
-  ));
-  const decisionLogStore = options.decisionLogStore ?? new InMemoryAgentDecisionLogStore();
-  const result = await runMinimalAgentTeamTrade({
-    strategy,
-    playbook,
-    portfolio,
-    broker,
-    model,
-    decisionLogStore,
-    cycleId
-  });
-
-  return {
-    ...result,
-    strategy,
-    playbook,
-    portfolio
-  };
 }
 
 function defaultLiveCycleId(now: Date): string {
@@ -166,6 +185,14 @@ function requiredBrokerCredentialVault(vault: SecretsBackedBrokerCredentialVault
   }
 
   return vault;
+}
+
+function requiredPool(pool: Pool | null): Pool {
+  if (!pool) {
+    throw new Error("Postgres pool is required for the default live decision log store");
+  }
+
+  return pool;
 }
 
 async function createActiveLiveStrategy(
@@ -231,7 +258,7 @@ function brokerSnapshotToPortfolio(
   return {
     equity: numberFromBrokerString(account.portfolioValue, "portfolioValue"),
     cash: numberFromBrokerString(account.cash, "cash"),
-    dailyPnl: 0,
+    dailyPnl: numberFromBrokerString(account.dailyPnl, "dailyPnl"),
     positions: positions.map((position) => ({
       symbol: position.symbol,
       qty: numberFromBrokerString(position.qty, `${position.symbol} qty`),
