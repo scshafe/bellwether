@@ -172,6 +172,7 @@ describe("live trade cycle composition root", () => {
       ],
       signals: [{ label: "News tone", value: "Momentum read is constructive", source: "curated-feed" }]
     });
+    assert.deepEqual(result.qualitativeBrief, result.decisionLog.qualitativeEvidence);
     assert.equal(model.requests.length, 4);
     assert.equal(model.requests[0]?.schemaName, "qualitative_brief");
     assert.equal(model.requests[1]?.schemaName, "strategy_analyst_decision");

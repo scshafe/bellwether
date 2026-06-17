@@ -11,7 +11,8 @@ import {
   PostgresAgentDecisionLogStore,
   runMinimalAgentTeamTrade,
   type AgentDecisionLogStore,
-  type AgentTeamTradeCycleResult
+  type AgentTeamTradeCycleResult,
+  type PortalQualitativeEvidence
 } from "./agent-team.js";
 import type { Pool } from "pg";
 import { createPool } from "./db.js";
@@ -73,6 +74,7 @@ export type LiveTradeCycleResult = AgentTeamTradeCycleResult & {
   strategy: StrategyRecord;
   playbook: QuantPlaybook;
   portfolio: PortfolioSnapshot;
+  qualitativeBrief?: PortalQualitativeEvidence;
 };
 
 export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}): Promise<LiveTradeCycleResult> {
@@ -154,7 +156,8 @@ export async function runLiveTradeCycle(options: RunLiveTradeCycleOptions = {}):
       ...result,
       strategy,
       playbook,
-      portfolio
+      portfolio,
+      qualitativeBrief
     };
   } finally {
     if (shouldClosePool) {
