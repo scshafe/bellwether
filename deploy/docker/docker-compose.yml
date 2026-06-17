@@ -1,0 +1,93 @@
+# Bellwether — self-contained tailnet deployment (Mac / Colima).
+#
+# Brings up the portal server + worker + its own Postgres on a private network.
+# The server is published on the host loopback (127.0.0.1:17893); a host-side
+# `tailscale serve` (see deploy/README) fronts it onto the tailnet at
+#   https://elrics-mac-mini.tail49736b.ts.net:8443
+# using the Mac's existing Tailscale identity (no sidecar / no new auth key).
+#
+# Secrets come from a gitignored .env (passwords) + read-only bind mounts of the
+# canonical agent-resources credential files (PAPER only). PAPER MONEY ONLY.
+#
+#   cp .env.example .env   # then fill it in
+#   docker compose up -d --build
+
+name: bellwether
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bellwether-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_trading_platform
+      POSTGRES_USER: atp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ../../db/bootstrap:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atp -d agent_trading_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: bellwether:latest
+    container_name: bellwether-server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:17893:3000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      PUBLIC_BASE_URL: "https://elrics-mac-mini.tail49736b.ts.net:8443"
+      DATABASE_URL: "postgres://atp:${POSTGRES_PASSWORD}@db:5432/agent_trading_platform"
+      ALPACA_PAPER_CREDENTIAL_FILE: /run/secrets/alpaca-paper.env
+      PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?set PORTAL_ADMIN_PASSWORD in .env}
+      PORTAL_ADMIN_DISPLAY_NAME: "Cole (admin)"
+      PORTAL_ADMIN_ROLE: admin
+    volumes:
+      - ${BELLWETHER_AGENT_RESOURCES}/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  worker:
+    image: bellwether:latest
+    container_name: bellwether-worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      server:
+        condition: service_started
+    command: ["node", "dist/worker.js"]
+    environment:
+      DATABASE_URL: "postgres://atp:${POSTGRES_PASSWORD}@db:5432/agent_trading_platform"
+      ALPACA_PAPER_CREDENTIAL_FILE: /run/secrets/alpaca-paper.env
+      LLM_OAUTH_CREDENTIAL_FILE: /run/secrets/openai-oauth.json
+      WORKER_READY_FILE: /tmp/worker-ready
+    volumes:
+      - ${BELLWETHER_AGENT_RESOURCES}/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
+      - ${BELLWETHER_AGENT_RESOURCES}/openai-oauth.json:/run/secrets/openai-oauth.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/worker-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  db-data:
