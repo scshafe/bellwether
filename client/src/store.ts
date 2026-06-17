@@ -3,6 +3,8 @@ import authReducer from "./store/authSlice";
 import decisionsReducer from "./store/decisionsSlice";
 import positionsReducer from "./store/positionsSlice";
 import runtimeReducer from "./store/runtimeSlice";
+import strategiesReducer from "./store/strategiesSlice";
+import strategyChatReducer from "./store/strategyChatSlice";
 import workspaceReducer from "./store/workspaceSlice";
 
 export const store = configureStore({
@@ -11,6 +13,8 @@ export const store = configureStore({
     decisions: decisionsReducer,
     positions: positionsReducer,
     runtime: runtimeReducer,
+    strategies: strategiesReducer,
+    strategyChat: strategyChatReducer,
     workspace: workspaceReducer
   }
 });

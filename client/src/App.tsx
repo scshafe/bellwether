@@ -1,15 +1,45 @@
 import type { FormEvent, ReactElement, ReactNode } from "react";
 
+import { quantPlaybookParameterKeys, type QuantPlaybookParameterKey, type QuantPlaybookParameters } from "./quantPlaybookParameters";
 import { createSession, setPassword, setUsername, signOut } from "./store/authSlice";
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
 import { fetchRuntimeStatus, startAgentRuntime, stopAgentRuntime, type RuntimeStateSnapshot } from "./store/runtimeSlice";
+import {
+  clearStrategyEditDraft,
+  createPortalStrategy,
+  fetchPortalStrategies,
+  loadStrategyEditDraft,
+  selectStrategy,
+  setStrategiesView,
+  strategiesSelectors,
+  transitionPortalStrategy,
+  updateCreateDraftField,
+  updateCreateDraftParameter,
+  updateEditDraftField,
+  updateEditDraftParameter,
+  updatePortalStrategy,
+  type StrategyAction,
+  type StrategyDraft,
+  type StrategyRecord,
+  type StrategyStatus
+} from "./store/strategiesSlice";
+import {
+  fetchStrategyChatThread,
+  postStrategyChatMessage,
+  setStrategyChatDraft,
+  setStrategyChatMode,
+  type StrategyChatMessage,
+  type StrategyChatMetadata,
+  type StrategyChatMode
+} from "./store/strategyChatSlice";
 import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
   { id: "positions", label: "Positions + P&L", status: "live" },
   { id: "decisions", label: "Decision Log", status: "live" },
+  { id: "strategies", label: "Strategy Workbench", status: "P6d" },
   { id: "control", label: "Agent Control", status: "P4d" }
 ];
 
@@ -28,6 +58,7 @@ export function App(): ReactElement {
         void dispatch(fetchPortalPositions());
         void dispatch(fetchPortalDecisions());
         void dispatch(fetchRuntimeStatus());
+        void dispatch(fetchPortalStrategies());
       });
   };
 
@@ -85,6 +116,7 @@ export function App(): ReactElement {
           </nav>
 
           {activeTab === "decisions" ? <DecisionsWorkspace /> : null}
+          {activeTab === "strategies" ? <StrategiesWorkspace canManageStrategies={canManageRuntime} /> : null}
           {activeTab === "control" && canManageRuntime ? <ControlWorkspace /> : null}
           {activeTab === "positions" || (activeTab === "control" && !canManageRuntime) ? <PositionsWorkspace /> : null}
         </section>
@@ -458,6 +490,347 @@ function ControlWorkspace(): ReactElement {
   );
 }
 
+function StrategiesWorkspace({ canManageStrategies }: { canManageStrategies: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const strategies = useAppSelector(strategiesSelectors.selectAll);
+  const status = useAppSelector((state) => state.strategies.status);
+  const mutationStatus = useAppSelector((state) => state.strategies.mutationStatus);
+  const error = useAppSelector((state) => state.strategies.error);
+  const refreshedAt = useAppSelector((state) => state.strategies.refreshedAt);
+  const activeView = useAppSelector((state) => state.strategies.activeView);
+  const busy = status === "loading" || mutationStatus === "loading";
+
+  return (
+    <section className="panel strategies-workbench">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">GET /portal/strategies</p>
+          <h2>Strategy Workbench</h2>
+        </div>
+        <div className="control-actions">
+          <button type="button" className={activeView === "registry" ? undefined : "ghost"} onClick={() => dispatch(setStrategiesView("registry"))}>
+            Registry
+          </button>
+          <button type="button" className={activeView === "chat" ? undefined : "ghost"} onClick={() => dispatch(setStrategiesView("chat"))}>
+            Chat
+          </button>
+          <button type="button" className="ghost" onClick={() => dispatch(fetchPortalStrategies())} disabled={busy}>
+            {status === "loading" ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+      </header>
+
+      {error ? <p className="error">{error}</p> : null}
+      {refreshedAt ? <p className="muted">Strategy registry refreshed {formatDateTime(refreshedAt)}</p> : null}
+      {!canManageStrategies ? <p className="muted">Viewer session: registry and chat are read-only. Draft strategies are filtered server-side.</p> : null}
+
+      {activeView === "registry" ? <StrategyRegistry strategies={strategies} canManageStrategies={canManageStrategies} /> : null}
+      {activeView === "chat" ? <StrategyChatWorkspace strategies={strategies} canManageStrategies={canManageStrategies} /> : null}
+    </section>
+  );
+}
+
+function StrategyRegistry({ strategies, canManageStrategies }: { strategies: StrategyRecord[]; canManageStrategies: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const createDraft = useAppSelector((state) => state.strategies.createDraft);
+  const editDraft = useAppSelector((state) => state.strategies.editDraft);
+  const mutationStatus = useAppSelector((state) => state.strategies.mutationStatus);
+  const busy = mutationStatus === "loading";
+
+  const submitCreate = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (canManageStrategies) {
+      void dispatch(createPortalStrategy(createDraft));
+    }
+  };
+
+  return (
+    <div className="strategy-registry">
+      {canManageStrategies ? <StrategyCreateForm draft={createDraft} busy={busy} onSubmit={submitCreate} /> : null}
+      {editDraft && canManageStrategies ? <StrategyEditForm draft={editDraft} busy={busy} /> : null}
+
+      {strategies.length === 0 ? (
+        <p className="empty">No strategies returned. Use Refresh or create the first draft strategy.</p>
+      ) : (
+        <div className="strategy-grid">
+          {strategies.map((strategy) => (
+            <StrategyCard key={strategy.id} strategy={strategy} canManageStrategies={canManageStrategies} busy={busy} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StrategyCreateForm({ draft, busy, onSubmit }: { draft: StrategyDraft; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }): ReactElement {
+  const dispatch = useAppDispatch();
+
+  return (
+    <form className="login-panel strategy-form" onSubmit={onSubmit}>
+      <div>
+        <p className="eyebrow">POST /portal/strategies</p>
+        <h2>Create Strategy Draft</h2>
+        <p className="muted">Parameters are prefilled from the quant playbook defaults; override only what changes the mandate.</p>
+      </div>
+      <label>
+        Name
+        <input value={draft.name} onChange={(event) => dispatch(updateCreateDraftField({ field: "name", value: event.currentTarget.value }))} required />
+      </label>
+      <label>
+        Description
+        <input value={draft.description} onChange={(event) => dispatch(updateCreateDraftField({ field: "description", value: event.currentTarget.value }))} />
+      </label>
+      <ParameterInputs
+        parameters={draft.parameters}
+        onChange={(key, value) => dispatch(updateCreateDraftParameter({ key, value }))}
+      />
+      <button type="submit" disabled={busy || !draft.name.trim()}>
+        {busy ? "Creating..." : "Create Draft"}
+      </button>
+    </form>
+  );
+}
+
+function StrategyEditForm({ draft, busy }: { draft: StrategyDraft & { id: string }; busy: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const submitEdit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void dispatch(updatePortalStrategy(draft));
+  };
+
+  return (
+    <form className="decision-card strategy-edit-form" onSubmit={submitEdit}>
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">PATCH /portal/strategies/:id</p>
+          <h3>Edit Strategy</h3>
+        </div>
+        <div className="control-actions">
+          <button type="button" className="ghost" onClick={() => dispatch(clearStrategyEditDraft())} disabled={busy}>Cancel</button>
+          <button type="submit" disabled={busy || !draft.name.trim()}>{busy ? "Saving..." : "Save Patch"}</button>
+        </div>
+      </header>
+      <div className="strategy-edit-grid">
+        <label>
+          Name
+          <input value={draft.name} onChange={(event) => dispatch(updateEditDraftField({ field: "name", value: event.currentTarget.value }))} required />
+        </label>
+        <label>
+          Description
+          <input value={draft.description} onChange={(event) => dispatch(updateEditDraftField({ field: "description", value: event.currentTarget.value }))} />
+        </label>
+      </div>
+      <ParameterInputs parameters={draft.parameters} onChange={(key, value) => dispatch(updateEditDraftParameter({ key, value }))} />
+    </form>
+  );
+}
+
+function ParameterInputs({ parameters, onChange }: { parameters: QuantPlaybookParameters; onChange: (key: QuantPlaybookParameterKey, value: number) => void }): ReactElement {
+  return (
+    <div className="parameter-input-grid">
+      {quantPlaybookParameterKeys.map((key) => (
+        <label key={key}>
+          {splitCamel(key)}
+          <input
+            type="number"
+            step="any"
+            value={parameters[key]}
+            onChange={(event) => onChange(key, Number(event.currentTarget.value))}
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function StrategyCard({ strategy, canManageStrategies, busy }: { strategy: StrategyRecord; canManageStrategies: boolean; busy: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const actions = lifecycleActions[strategy.status];
+  const openChat = () => {
+    dispatch(selectStrategy(strategy.id));
+    void dispatch(fetchStrategyChatThread(strategy.id));
+  };
+
+  return (
+    <article className="decision-card strategy-card">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">Strategy</p>
+          <h3>{strategy.name}</h3>
+        </div>
+        <div className="id-stack">
+          <span className={`status-badge status-${strategy.status}`}>{formatStatus(strategy.status)}</span>
+          <code>{strategy.id}</code>
+        </div>
+      </header>
+
+      {strategy.description ? <p>{strategy.description}</p> : <p className="muted">No description provided.</p>}
+      <div className="decision-meta">
+        <Meta label="Updated" value={formatDateTime(strategy.updatedAt)} />
+        <Meta label="Created" value={formatDateTime(strategy.createdAt)} />
+        <Meta label="Reason" value={strategy.reason ?? "none"} />
+      </div>
+      <ParameterSummary parameters={strategy.parameters} />
+      <div className="control-actions strategy-actions">
+        <button type="button" className="ghost" onClick={openChat}>Open Chat</button>
+        {canManageStrategies ? <button type="button" className="ghost" onClick={() => dispatch(loadStrategyEditDraft(strategy))} disabled={busy}>Edit</button> : null}
+        {canManageStrategies
+          ? actions.map((action) => (
+              <button
+                key={action}
+                type="button"
+                className={action === "retire" ? "danger" : "ghost"}
+                onClick={() => dispatch(transitionPortalStrategy({ id: strategy.id, action }))}
+                disabled={busy}
+              >
+                {lifecycleActionLabel(action)}
+              </button>
+            ))
+          : null}
+      </div>
+    </article>
+  );
+}
+
+function ParameterSummary({ parameters }: { parameters: QuantPlaybookParameters | Partial<QuantPlaybookParameters> }): ReactElement {
+  const values = Object.fromEntries(
+    Object.entries(parameters).filter(([, value]) => value !== undefined)
+  ) as Record<string, string | number | boolean | null>;
+
+  return <KeyValueList title="Quant Parameters" values={values} />;
+}
+
+function StrategyChatWorkspace({ strategies, canManageStrategies }: { strategies: StrategyRecord[]; canManageStrategies: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const selectedStrategy = useAppSelector((state) => {
+    const selectedId = state.strategies.selectedStrategyId;
+    return selectedId ? state.strategies.entities[selectedId] ?? null : null;
+  });
+
+  return (
+    <div className="strategy-chat-layout">
+      <aside className="strategy-chat-sidebar">
+        <p className="eyebrow">Strategies</p>
+        {strategies.length === 0 ? <p className="muted">Refresh the registry to select a strategy.</p> : null}
+        {strategies.map((strategy) => (
+          <button
+            key={strategy.id}
+            type="button"
+            className={selectedStrategy?.id === strategy.id ? "tab active" : "tab"}
+            onClick={() => {
+              dispatch(selectStrategy(strategy.id));
+              void dispatch(fetchStrategyChatThread(strategy.id));
+            }}
+          >
+            <span>{strategy.name}</span>
+            <code>{formatStatus(strategy.status)}</code>
+          </button>
+        ))}
+      </aside>
+      {selectedStrategy ? <StrategyChatPanel strategy={selectedStrategy} canManageStrategies={canManageStrategies} /> : <p className="empty">Select a strategy to read its Strategy/Analyst thread.</p>}
+    </div>
+  );
+}
+
+function StrategyChatPanel({ strategy, canManageStrategies }: { strategy: StrategyRecord; canManageStrategies: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const thread = useAppSelector((state) => state.strategyChat.threads[strategy.id]);
+  const messages = thread?.messages ?? [];
+  const status = thread?.status ?? "idle";
+  const postStatus = thread?.postStatus ?? "idle";
+  const draft = thread?.draft ?? "";
+  const mode = thread?.mode ?? "formalize";
+  const error = thread?.error ?? null;
+  const busy = status === "loading" || postStatus === "loading";
+
+  const submitMessage = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const content = draft.trim();
+    if (content && canManageStrategies) {
+      void dispatch(postStrategyChatMessage({ strategyId: strategy.id, content, mode }));
+    }
+  };
+
+  return (
+    <section className="strategy-chat-panel">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">GET /portal/strategies/:id/chat</p>
+          <h3>{strategy.name}</h3>
+        </div>
+        <button type="button" className="ghost" onClick={() => dispatch(fetchStrategyChatThread(strategy.id))} disabled={busy}>
+          {status === "loading" ? "Refreshing..." : "Refresh Thread"}
+        </button>
+      </header>
+      {error ? <p className="error">{error}</p> : null}
+      {thread?.refreshedAt ? <p className="muted">Thread refreshed {formatDateTime(thread.refreshedAt)}</p> : null}
+      <div className="chat-thread">
+        {messages.length === 0 ? <p className="empty">No messages yet. Refresh the thread or start the co-development conversation.</p> : null}
+        {messages.map((message) => <StrategyChatBubble key={message.id} message={message} />)}
+      </div>
+      {canManageStrategies ? (
+        <form className="chat-composer" onSubmit={submitMessage}>
+          <label>
+            Mode
+            <select value={mode} onChange={(event) => dispatch(setStrategyChatMode({ strategyId: strategy.id, mode: event.currentTarget.value as StrategyChatMode }))}>
+              <option value="formalize">Formalize mandate</option>
+              <option value="brainstorm">Brainstorm candidates</option>
+            </select>
+          </label>
+          <label>
+            Message
+            <textarea value={draft} onChange={(event) => dispatch(setStrategyChatDraft({ strategyId: strategy.id, value: event.currentTarget.value }))} rows={4} />
+          </label>
+          <button type="submit" disabled={busy || !draft.trim()}>{postStatus === "loading" ? "Posting..." : "Post Message"}</button>
+        </form>
+      ) : (
+        <p className="muted">Viewer session: chat posting is hidden to avoid admin-only 403s.</p>
+      )}
+    </section>
+  );
+}
+
+function StrategyChatBubble({ message }: { message: StrategyChatMessage }): ReactElement {
+  return (
+    <article className={`chat-bubble ${message.role}`}>
+      <div className="chat-bubble-header">
+        <strong>{message.role === "analyst" ? "Strategy/Analyst" : "Operator"}</strong>
+        <span>{formatDateTime(message.createdAt)}</span>
+      </div>
+      <p>{message.content}</p>
+      {message.role === "analyst" && message.metadata ? <StrategyChatMetadataBlock metadata={message.metadata} /> : null}
+    </article>
+  );
+}
+
+function StrategyChatMetadataBlock({ metadata }: { metadata: StrategyChatMetadata }): ReactElement | null {
+  const hasDelta = metadata.proposedParameterDelta && Object.keys(metadata.proposedParameterDelta).length > 0;
+  const candidateIdeas = metadata.candidateIdeas ?? [];
+
+  if (!hasDelta && candidateIdeas.length === 0 && !metadata.fallback) {
+    return null;
+  }
+
+  return (
+    <section className="chat-metadata">
+      <p className="eyebrow">Read-Only Analyst Metadata{metadata.mode ? ` / ${metadata.mode}` : ""}</p>
+      {metadata.fallback ? <p className="muted">Fallback response: the analyst model did not return a structured proposal.</p> : null}
+      {hasDelta ? <ParameterSummary parameters={metadata.proposedParameterDelta ?? {}} /> : null}
+      {candidateIdeas.length > 0 ? (
+        <div className="candidate-ideas">
+          {candidateIdeas.map((idea) => (
+            <article key={`${idea.name}:${idea.mandate}`}>
+              <strong>{idea.name}</strong>
+              <p>{idea.mandate}</p>
+              <ParameterSummary parameters={idea.suggestedParameters} />
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function RuntimeStatusCard({ snapshot }: { snapshot: RuntimeStateSnapshot }): ReactElement {
   return (
     <section className={snapshot.state === "running" ? "runtime-card running" : "runtime-card stopped"}>
@@ -505,7 +878,7 @@ function formatDateTime(raw: string): string {
 }
 
 function splitCamel(raw: string): string {
-  return raw.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return raw.replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2");
 }
 
 function formatPercent(raw: string | undefined): string {
@@ -521,3 +894,35 @@ function formatPercent(raw: string | undefined): string {
 
   return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 2 }).format(value);
 }
+
+function formatStatus(status: StrategyStatus): string {
+  return status.replace(/_/g, " ");
+}
+
+function lifecycleActionLabel(action: StrategyAction): string {
+  switch (action) {
+    case "discuss":
+      return "Discuss";
+    case "return-to-draft":
+      return "Return to Draft";
+    case "approve":
+      return "Approve";
+    case "activate":
+      return "Activate";
+    case "pause":
+      return "Pause";
+    case "resume":
+      return "Resume";
+    case "retire":
+      return "Retire";
+  }
+}
+
+const lifecycleActions: Record<StrategyStatus, StrategyAction[]> = {
+  draft: ["discuss", "approve"],
+  under_discussion: ["approve", "return-to-draft"],
+  approved: ["activate"],
+  active: ["pause", "retire"],
+  paused: ["resume", "retire"],
+  retired: []
+};

@@ -20,7 +20,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -47,13 +49,19 @@ button.danger {
   background: #991b1b;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.36);
   border-radius: 0.55rem;
   color: #f8fafc;
   background: rgba(15, 23, 42, 0.92);
   padding: 0.68rem 0.75rem;
+}
+
+textarea {
+  resize: vertical;
 }
 
 code {
@@ -465,6 +473,172 @@ tr:last-child td {
   text-transform: uppercase;
 }
 
+.strategies-workbench {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.strategy-registry,
+.strategy-chat-layout,
+.strategy-chat-panel,
+.chat-thread,
+.chat-composer,
+.candidate-ideas {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.strategy-form {
+  grid-template-columns: 1.2fr 0.8fr 1fr;
+  align-items: start;
+}
+
+.strategy-form button[type="submit"] {
+  align-self: end;
+}
+
+.parameter-input-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.parameter-input-grid label,
+.strategy-edit-grid label,
+.chat-composer label {
+  display: grid;
+  gap: 0.35rem;
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.strategy-card,
+.strategy-edit-form,
+.strategy-chat-panel,
+.strategy-chat-sidebar,
+.chat-bubble,
+.chat-metadata,
+.candidate-ideas article {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1rem;
+  background: rgba(2, 6, 23, 0.48);
+  padding: 0.9rem;
+}
+
+.strategy-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: 0.65rem;
+  margin: 0.75rem 0;
+}
+
+.strategy-actions {
+  margin-top: 0.75rem;
+}
+
+.status-badge {
+  border: 1px solid rgba(94, 234, 212, 0.34);
+  border-radius: 999px;
+  color: #ccfbf1;
+  background: rgba(13, 148, 136, 0.22);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.status-draft,
+.status-under_discussion {
+  border-color: rgba(251, 191, 36, 0.42);
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.34);
+}
+
+.status-active {
+  border-color: rgba(134, 239, 172, 0.42);
+  color: #bbf7d0;
+  background: rgba(20, 83, 45, 0.36);
+}
+
+.status-paused,
+.status-retired {
+  border-color: rgba(248, 113, 113, 0.42);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.34);
+}
+
+.strategy-chat-layout {
+  grid-template-columns: minmax(14rem, 18rem) 1fr;
+  align-items: start;
+}
+
+.strategy-chat-sidebar {
+  position: sticky;
+  top: 1rem;
+}
+
+.strategy-chat-sidebar .tab {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.strategy-chat-panel {
+  min-width: 0;
+}
+
+.chat-thread {
+  max-height: 56vh;
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.chat-bubble {
+  width: min(860px, 92%);
+}
+
+.chat-bubble.user {
+  justify-self: end;
+  background: rgba(20, 83, 45, 0.32);
+}
+
+.chat-bubble.analyst {
+  justify-self: start;
+  background: rgba(15, 23, 42, 0.74);
+}
+
+.chat-bubble-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  color: #94a3b8;
+}
+
+.chat-bubble p {
+  color: #e2e8f0;
+  white-space: pre-wrap;
+}
+
+.chat-metadata {
+  margin-top: 0.65rem;
+  background: rgba(15, 23, 42, 0.68);
+}
+
+.candidate-ideas article {
+  padding: 0.7rem;
+}
+
+.chat-composer {
+  grid-template-columns: 12rem 1fr auto;
+  align-items: end;
+}
+
 @media (max-width: 920px) {
   .masthead,
   .login-panel,
@@ -490,8 +664,21 @@ tr:last-child td {
   .decision-meta,
   .glass-grid,
   .qualitative-slot,
-  .runtime-grid {
+  .runtime-grid,
+  .strategy-form,
+  .strategy-grid,
+  .strategy-edit-grid,
+  .strategy-chat-layout,
+  .chat-composer {
     grid-template-columns: 1fr;
+  }
+
+  .parameter-input-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategy-chat-sidebar {
+    position: static;
   }
 
   .control-actions {
@@ -510,6 +697,14 @@ tr:last-child td {
 
   .metric-grid {
     grid-template-columns: 1fr;
+  }
+
+  .parameter-input-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-bubble {
+    width: 100%;
   }
 }
 
