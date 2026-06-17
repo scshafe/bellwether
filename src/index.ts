@@ -7,6 +7,7 @@ import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./a
 import { createPool } from "./db.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord, type Role } from "./identity.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
+import { ensureQualitativeItemsSchema, ensureSourcesSchema } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
@@ -17,6 +18,8 @@ const pool = createPool(databaseUrl);
 
 await ensureAgentDecisionLogSchema(pool);
 await ensureAgentRuntimeControlSchema(pool);
+await ensureSourcesSchema(pool);
+await ensureQualitativeItemsSchema(pool);
 
 const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
 const server = createServer({

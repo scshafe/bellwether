@@ -9,6 +9,13 @@ import { createPool } from "./db.js";
 import { runLiveTradeCycle } from "./live-cycle.js";
 import { createAgentRuntime } from "./placement.js";
 import {
+  ensureQualitativeItemsSchema,
+  ensureSourcesSchema,
+  PostgresQualitativeItemsStore,
+  PostgresSourcesStore,
+  runRssAtomIngestPoller
+} from "./qualitative.js";
+import {
   claimEnabledLiveCycleJob,
   ensureAgentRuntimeControlSchema,
   recordLiveCycleFailure,
@@ -31,10 +38,21 @@ process.on("SIGTERM", () => {
 
 export async function runWorker(): Promise<void> {
   const pool = createPool();
+  const qualitativePollerController = new AbortController();
+  let qualitativePoller: Promise<void> | undefined;
 
   try {
     await pool.query("SELECT 1");
     await ensureAgentRuntimeControlSchema(pool);
+    await ensureSourcesSchema(pool);
+    await ensureQualitativeItemsSchema(pool);
+    qualitativePoller = runRssAtomIngestPoller({
+      sourcesStore: new PostgresSourcesStore(pool),
+      itemsStore: new PostgresQualitativeItemsStore(pool),
+      pollIntervalMs: workerPlacement.qualitativeIngestPollIntervalMs,
+      signal: qualitativePollerController.signal,
+      logger: console
+    });
     await writeFile(workerPlacement.readyFile, "ready\n");
 
     while (shouldRun) {
@@ -55,6 +73,10 @@ export async function runWorker(): Promise<void> {
       await delay(workerPlacement.pollIntervalMs);
     }
   } finally {
+    qualitativePollerController.abort();
+    await qualitativePoller?.catch((error: unknown) => {
+      console.error(error);
+    });
     await rm(workerPlacement.readyFile, { force: true });
     await pool.end();
   }

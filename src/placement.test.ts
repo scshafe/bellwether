@@ -46,6 +46,10 @@ describe("placement config", () => {
   it("validates numeric placement config", () => {
     assert.throws(() => readServerEndpointsConfig({ PORT: "70000" }), /PORT must be a valid TCP port/);
     assert.throws(() => readWorkerPlacement({ WORKER_POLL_INTERVAL_MS: "0" }), /WORKER_POLL_INTERVAL_MS must be a positive integer/);
+    assert.throws(
+      () => readWorkerPlacement({ QUALITATIVE_INGEST_POLL_INTERVAL_MS: "0" }),
+      /QUALITATIVE_INGEST_POLL_INTERVAL_MS must be a positive integer/
+    );
   });
 });
 
@@ -56,7 +60,8 @@ describe("AgentRuntime placement", () => {
       DATABASE_SERVICE_NAME: "db",
       WORKER_SERVICE_NAME: "worker",
       WORKER_READY_FILE: "/tmp/worker-ready",
-      WORKER_POLL_INTERVAL_MS: "2500"
+      WORKER_POLL_INTERVAL_MS: "2500",
+      QUALITATIVE_INGEST_POLL_INTERVAL_MS: "60000"
     });
 
     assert.deepEqual(runtime.describeWorkerPlacement(), {
@@ -65,6 +70,7 @@ describe("AgentRuntime placement", () => {
       coordination: "postgres",
       databaseServiceName: "db",
       pollIntervalMs: 2500,
+      qualitativeIngestPollIntervalMs: 60000,
       readyFile: "/tmp/worker-ready"
     });
   });

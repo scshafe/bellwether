@@ -17,6 +17,7 @@ export type WorkerPlacement = {
   coordination: "postgres";
   databaseServiceName: string;
   pollIntervalMs: number;
+  qualitativeIngestPollIntervalMs: number;
   readyFile: string;
 };
 
@@ -114,6 +115,10 @@ export function readWorkerPlacement(config: NodeJS.ProcessEnv = process.env): Wo
     coordination: "postgres",
     databaseServiceName: config.DATABASE_SERVICE_NAME ?? "db",
     pollIntervalMs: parsePositiveInteger(config.WORKER_POLL_INTERVAL_MS ?? "5000", "WORKER_POLL_INTERVAL_MS"),
+    qualitativeIngestPollIntervalMs: parsePositiveInteger(
+      config.QUALITATIVE_INGEST_POLL_INTERVAL_MS ?? "300000",
+      "QUALITATIVE_INGEST_POLL_INTERVAL_MS"
+    ),
     readyFile: config.WORKER_READY_FILE ?? "/tmp/worker-ready"
   };
 }
