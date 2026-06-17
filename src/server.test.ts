@@ -764,7 +764,7 @@ describe("portal roster API", () => {
         updatedAt: "2026-06-17T10:00:00.000Z"
       }
     ]);
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), sourcesStore });
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), sourcesStore, env: {} });
     server = started.server;
     baseUrl = started.baseUrl;
     adminToken = await authenticate(baseUrl, "cole");
@@ -858,6 +858,43 @@ describe("portal roster API", () => {
     assert.equal(sourcesStore.calls.length, callsBefore);
   });
 
+  it("gates X-handle roster creation behind the feature flag", async () => {
+    const disabledResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      source_key: "x-handle-disabled",
+      name: "Disabled X Handle",
+      source_type: "x-handle",
+      feed_url: "https://x.com/disabled",
+      quality_rating: 3
+    });
+    const enabledStore = new RecordingSourcesStore();
+    const enabledStarted = await startTestServer({
+      identityProvider: testIdentityProvider(),
+      sourcesStore: enabledStore,
+      env: { BELLWETHER_FEATURE_X_HANDLES: "true" }
+    });
+
+    try {
+      const enabledToken = await authenticate(enabledStarted.baseUrl, "cole");
+      const enabledResponse = await postJson(enabledStarted.baseUrl, "/portal/roster", enabledToken, {
+        source_key: "x-handle-enabled",
+        name: "Enabled X Handle",
+        source_type: "x-handle",
+        feed_url: "https://x.com/enabled",
+        quality_rating: 4
+      });
+      const enabledBody = (await enabledResponse.json()) as SourceRecord;
+
+      assert.equal(disabledResponse.status, 400);
+      assert.deepEqual(await disabledResponse.json(), { error: "x_handles_disabled" });
+      assert.equal(enabledResponse.status, 201);
+      assert.equal(enabledBody.sourceType, "x-handle");
+      assert.equal(enabledBody.feedUrl, "https://x.com/enabled");
+      assert.deepEqual(enabledStore.calls, ["createSource"]);
+    } finally {
+      await closeTestServer(enabledStarted.server);
+    }
+  });
+
   it("maps invalid payloads, unknown ids, duplicate keys, and missing dependencies", async () => {
     const badRatingResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
       source_key: "bad-rating",
@@ -868,7 +905,7 @@ describe("portal roster API", () => {
     const badTypeResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
       source_key: "bad-type",
       name: "Bad Type",
-      source_type: "x-handle",
+      source_type: "video",
       quality_rating: 3
     });
     const badFeedResponse = await postJson(baseUrl, "/portal/roster", adminToken, {

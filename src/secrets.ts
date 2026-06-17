@@ -26,6 +26,10 @@ export type BrokerCredential = {
   secretKey: string;
 };
 
+export type XApiCredential = {
+  bearerToken: string;
+};
+
 export interface BrokerCredentialVault {
   getBrokerCredential(brokerAccountId: string): Promise<BrokerCredential | null>;
 }
@@ -45,5 +49,27 @@ export class SecretsBackedBrokerCredentialVault implements BrokerCredentialVault
     }
 
     return { keyId, secretKey };
+  }
+}
+
+export interface XApiCredentialVault {
+  getXApiCredential(accountId?: string): Promise<XApiCredential | null>;
+}
+
+export class SecretsBackedXApiCredentialVault implements XApiCredentialVault {
+  constructor(
+    private readonly secretsStore: SecretsStore,
+    private readonly prefix = "x-api-credentials",
+    private readonly defaultAccountId = "default"
+  ) {}
+
+  async getXApiCredential(accountId = this.defaultAccountId): Promise<XApiCredential | null> {
+    const bearerToken = await this.secretsStore.getSecret(`${this.prefix}/${accountId}/bearer-token`);
+
+    if (!bearerToken) {
+      return null;
+    }
+
+    return { bearerToken };
   }
 }

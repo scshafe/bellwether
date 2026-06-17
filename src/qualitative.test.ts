@@ -39,6 +39,15 @@ describe("qualitative source registry", () => {
       qualityRating: 4
     });
     await store.createSource({
+      id: "33333333-3333-4333-8333-333333333333",
+      sourceKey: "x-handle-bellwether",
+      name: "Bellwether X Handle",
+      sourceType: "x-handle",
+      feedUrl: "https://x.com/bellwether",
+      enabled: false,
+      qualityRating: 3
+    });
+    await store.createSource({
       sourceKey: "disabled-feed",
       name: "Disabled Feed",
       sourceType: "atom",
@@ -59,6 +68,10 @@ describe("qualitative source registry", () => {
     await assert.rejects(
       () => store.createSource({ sourceKey: "bad-quality", name: "Bad", feedUrl: "https://example.test/rss", qualityRating: 6 }),
       /qualityRating must be an integer from 1 to 5/u
+    );
+    await assert.rejects(
+      () => store.createSource({ sourceKey: "missing-x-handle", name: "Missing X Handle", sourceType: "x-handle", qualityRating: 3 }),
+      /feedUrl is required for RSS\/Atom\/X-handle sources/u
     );
   });
 
@@ -134,7 +147,7 @@ describe("qualitative source registry", () => {
     ]);
 
     await assert.rejects(() => store.updateSource("11111111-1111-4111-8111-111111111111", { qualityRating: 0 }), /qualityRating must be an integer from 1 to 5/u);
-    await assert.rejects(() => store.updateSource("11111111-1111-4111-8111-111111111111", { feedUrl: null }), /feedUrl is required for RSS\/Atom sources/u);
+    await assert.rejects(() => store.updateSource("11111111-1111-4111-8111-111111111111", { feedUrl: null }), /feedUrl is required for RSS\/Atom\/X-handle sources/u);
     await assert.rejects(() => store.updateSource("missing", { enabled: false }), /source missing was not found/u);
   });
 });
@@ -342,6 +355,32 @@ describe("Postgres qualitative stores", () => {
     assert.deepEqual(updateQuery?.values, ["11111111-1111-4111-8111-111111111111", "Updated Bravo", "https://feeds.example.test/updated.xml", true, 5]);
   });
 
+  it("uses idempotent bootstrap SQL and preserves the source feed-url invariant", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const pool = {
+      query: async (text: string, values?: unknown[]) => {
+        queries.push({ text, values });
+        return { rows: [] };
+      }
+    } as unknown as Pool;
+
+    await ensureSourcesSchema(pool);
+    await ensureSourcesSchema(pool);
+
+    const sql = queries[0]?.text ?? "";
+    assert.equal(queries.length, 2);
+    assert.match(sql, /CONSTRAINT sources_source_type_check CHECK \(source_type IN \('rss', 'atom', 'programmatic', 'x-handle'\)\)/u);
+    assert.match(sql, /table_constraint\.constraint_name <> 'sources_source_type_check'/u);
+    assert.match(sql, /check_constraint\.check_clause LIKE '%rss%'/u);
+    assert.match(sql, /check_constraint\.check_clause LIKE '%atom%'/u);
+    assert.match(sql, /check_constraint\.check_clause LIKE '%programmatic%'/u);
+    assert.match(sql, /ALTER TABLE sources DROP CONSTRAINT IF EXISTS sources_source_type_check/u);
+    assert.match(sql, /ALTER TABLE sources ADD CONSTRAINT sources_source_type_check CHECK \(source_type IN \('rss', 'atom', 'programmatic', 'x-handle'\)\)/u);
+    assert.match(sql, /CHECK \(source_type = 'programmatic' OR feed_url IS NOT NULL\)/u);
+    assert.doesNotMatch(sql, /DROP CONSTRAINT[^;]+feed_url/iu);
+    assert.equal(queries[1]?.text, queries[0]?.text);
+  });
+
   it("use bootstrap SQL and per-source dedup conflict handling", async () => {
     const queries: Array<{ text: string; values?: unknown[] }> = [];
     const sourceRow: SourceRow = {
@@ -418,6 +457,7 @@ describe("Postgres qualitative stores", () => {
     const recent = await itemsStore.listRecentItems({ ticker: "aapl", limit: 5 });
 
     assert.match(queries[0]?.text ?? "", /CREATE TABLE IF NOT EXISTS sources/u);
+    assert.match(queries[0]?.text ?? "", /source_type text NOT NULL CONSTRAINT sources_source_type_check/u);
     assert.match(queries[0]?.text ?? "", /quality_rating integer NOT NULL DEFAULT 3 CHECK \(quality_rating BETWEEN 1 AND 5\)/u);
     assert.match(queries[1]?.text ?? "", /CREATE TABLE IF NOT EXISTS qualitative_items/u);
     assert.match(queries[1]?.text ?? "", /UNIQUE \(source_id, source_item_id\)/u);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { InMemorySecretsStore, SecretsBackedBrokerCredentialVault } from "./secrets.js";
+import { InMemorySecretsStore, SecretsBackedBrokerCredentialVault, SecretsBackedXApiCredentialVault } from "./secrets.js";
 
 describe("InMemorySecretsStore", () => {
   it("stores and reads secrets by name", async () => {
@@ -35,5 +35,22 @@ describe("SecretsBackedBrokerCredentialVault", () => {
     const vault = new SecretsBackedBrokerCredentialVault(store);
 
     assert.equal(await vault.getBrokerCredential("family-paper"), null);
+  });
+});
+
+describe("SecretsBackedXApiCredentialVault", () => {
+  it("returns null when the X API bearer token is absent", async () => {
+    const vault = new SecretsBackedXApiCredentialVault(new InMemorySecretsStore());
+
+    assert.equal(await vault.getXApiCredential(), null);
+  });
+
+  it("returns the mounted X API bearer token", async () => {
+    const store = new InMemorySecretsStore({
+      "x-api-credentials/default/bearer-token": "placeholder-x-bearer-token"
+    });
+    const vault = new SecretsBackedXApiCredentialVault(store);
+
+    assert.deepEqual(await vault.getXApiCredential(), { bearerToken: "placeholder-x-bearer-token" });
   });
 });

@@ -2,7 +2,7 @@ import { createAsyncThunk, createEntityAdapter, createSlice, type PayloadAction 
 
 import type { RootState } from "../store";
 
-export type SourceType = "rss" | "atom" | "programmatic";
+export type SourceType = "rss" | "atom" | "programmatic" | "x-handle";
 
 export type SourceRecord = {
   id: string;

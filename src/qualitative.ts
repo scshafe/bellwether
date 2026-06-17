@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import type { Pool } from "pg";
 
-export const SOURCE_TYPES = ["rss", "atom", "programmatic"] as const;
+export const SOURCE_TYPES = ["rss", "atom", "programmatic", "x-handle"] as const;
 
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
@@ -511,7 +511,7 @@ function normalizeCreateSourceInput(input: CreateSourceInput): SourceRecord {
   validateSourceType(sourceType);
 
   if (sourceType !== "programmatic" && !input.feedUrl?.trim()) {
-    throw new Error("feedUrl is required for RSS/Atom sources");
+    throw new Error("feedUrl is required for RSS/Atom/X-handle sources");
   }
 
   const now = new Date().toISOString();
@@ -733,7 +733,7 @@ function validateSourceType(value: string): asserts value is SourceType {
 
 function assertSourceFeedUrlInvariant(source: SourceRecord): void {
   if (source.sourceType !== "programmatic" && !source.feedUrl) {
-    throw new Error("feedUrl is required for RSS/Atom sources");
+    throw new Error("feedUrl is required for RSS/Atom/X-handle sources");
   }
 }
 

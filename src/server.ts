@@ -15,6 +15,7 @@ import type { AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAdapter } from "./broker.js";
 import type { QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
+import { isFeatureEnabled } from "./config.js";
 import {
   SOURCE_TYPES,
   SourceNotFoundError,
@@ -50,6 +51,7 @@ export type ServerOptions = {
   strategyChatStore?: StrategyChatStore;
   strategyChatModel?: ReasoningModel;
   sourcesStore?: SourcesStore;
+  env?: NodeJS.ProcessEnv;
   staticAssetsDir?: string;
 };
 
@@ -165,7 +167,7 @@ export async function handleRequest(
       return;
     }
 
-    await handleRosterCreate(request, response, options.sourcesStore);
+    await handleRosterCreate(request, response, options.sourcesStore, options.env);
     return;
   }
 
@@ -472,7 +474,8 @@ async function handleRosterList(response: ServerResponse, sourcesStore: SourcesS
 async function handleRosterCreate(
   request: IncomingMessage,
   response: ServerResponse,
-  sourcesStore: SourcesStore | undefined
+  sourcesStore: SourcesStore | undefined,
+  env?: NodeJS.ProcessEnv
 ): Promise<void> {
   if (!sourcesStore) {
     writeJson(response, 503, { error: "sources_store_unavailable" });
@@ -489,6 +492,11 @@ async function handleRosterCreate(
 
   if (!input) {
     writeJson(response, 400, { error: "invalid_source_payload" });
+    return;
+  }
+
+  if (input.sourceType === "x-handle" && !isFeatureEnabled("x-handles", env)) {
+    writeJson(response, 400, { error: "x_handles_disabled" });
     return;
   }
 
