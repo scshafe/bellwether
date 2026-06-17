@@ -34,9 +34,20 @@ export function App(): ReactElement {
   return (
     <main className="app-shell">
       <section className="masthead">
-        <div>
-          <p className="eyebrow">Bellwether Portal</p>
-          <h1>Agent Trading Platform</h1>
+        <div className="brand">
+          <button
+            type="button"
+            className="brand-button"
+            onClick={() => dispatch(setActiveTab("positions"))}
+            aria-label="Bellwether — home"
+            title="Bellwether"
+          >
+            <img src="/icon.svg" alt="" className="brand-logo" width="44" height="44" />
+          </button>
+          <div className="brand-text">
+            <p className="eyebrow">Bellwether Portal</p>
+            <h1>Agent Trading Platform</h1>
+          </div>
         </div>
         <div className="session-card">
           {auth.user ? (

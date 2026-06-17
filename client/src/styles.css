@@ -512,3 +512,36 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 }
+
+/* Brand / main-menu button (logo) */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+.brand-button {
+  background: transparent;
+  padding: 0;
+  border-radius: 0.8rem;
+  line-height: 0;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.brand-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(2, 6, 23, 0.5);
+}
+.brand-button:focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 3px;
+}
+.brand-logo {
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 0.66rem;
+}
+.brand-text {
+  display: flex;
+  flex-direction: column;
+}

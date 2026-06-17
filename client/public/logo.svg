@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Bellwether logo"
+     fill="none" stroke="currentColor" stroke-width="18" stroke-linejoin="round" stroke-linecap="round">
+  <!-- pure outline mark: transparent background + center; inherits the surrounding text color -->
+  <circle cx="256" cy="84" r="24"/>
+  <path d="M256 104 C320 104 356 152 364 216 C372 284 382 324 400 354 C407 365 402 376 390 378 C347 383 301 385 256 385 C211 385 165 383 122 378 C110 376 105 365 112 354 C130 324 140 284 148 216 C156 152 192 104 256 104 Z"/>
+  <path d="M270 286 L218 372 L252 372 L230 448 L292 350 L258 350 L294 286 Z"/>
+</svg>
