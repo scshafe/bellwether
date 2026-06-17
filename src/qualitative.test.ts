@@ -14,6 +14,7 @@ import {
   runRssAtomIngestPoller,
   type QualitativeFetch,
   type QualitativeItemRow,
+  type SourceRecord,
   type SourceRow
 } from "./qualitative.js";
 
@@ -59,6 +60,82 @@ describe("qualitative source registry", () => {
       () => store.createSource({ sourceKey: "bad-quality", name: "Bad", feedUrl: "https://example.test/rss", qualityRating: 6 }),
       /qualityRating must be an integer from 1 to 5/u
     );
+  });
+
+  it("lists all sources, gets by id, updates provided fields, and deletes", async () => {
+    const rss: SourceRecord = {
+      id: "11111111-1111-4111-8111-111111111111",
+      sourceKey: "z-rss",
+      name: "Zulu RSS",
+      sourceType: "rss",
+      feedUrl: "https://feeds.example.test/z.xml",
+      enabled: false,
+      qualityRating: 2,
+      createdAt: "2026-06-17T10:00:00.000Z",
+      updatedAt: "2026-06-17T10:00:00.000Z"
+    };
+    const programmatic: SourceRecord = {
+      id: "22222222-2222-4222-8222-222222222222",
+      sourceKey: "alpha-programmatic",
+      name: "Alpha Programmatic",
+      sourceType: "programmatic",
+      enabled: true,
+      qualityRating: 4,
+      createdAt: "2026-06-17T10:00:00.000Z",
+      updatedAt: "2026-06-17T10:00:00.000Z"
+    };
+    const store = new InMemorySourcesStore([rss, programmatic]);
+
+    const all = await store.listSources();
+    const enabled = await store.listEnabledSources();
+    const updated = await store.updateSource(rss.id, {
+      name: "Updated RSS",
+      feedUrl: " https://feeds.example.test/updated.xml ",
+      enabled: true,
+      qualityRating: 5
+    });
+    const clearedProgrammaticFeed = await store.updateSource(programmatic.id, { feedUrl: null });
+
+    assert.deepEqual(
+      all.map((source) => [source.sourceKey, source.enabled]),
+      [
+        ["alpha-programmatic", true],
+        ["z-rss", false]
+      ]
+    );
+    assert.deepEqual(enabled.map((source) => source.sourceKey), ["alpha-programmatic"]);
+    assert.equal((await store.getSource(rss.id))?.sourceKey, "z-rss");
+    assert.equal(updated.name, "Updated RSS");
+    assert.equal(updated.feedUrl, "https://feeds.example.test/updated.xml");
+    assert.equal(updated.enabled, true);
+    assert.equal(updated.qualityRating, 5);
+    assert.equal(updated.createdAt, rss.createdAt);
+    assert.notEqual(updated.updatedAt, rss.updatedAt);
+    assert.equal(clearedProgrammaticFeed.feedUrl, undefined);
+    const deleted = await store.deleteSource(rss.id);
+    assert.equal(deleted, true);
+    assert.equal(await store.getSource(rss.id), null);
+    assert.equal(await store.deleteSource(rss.id), false);
+  });
+
+  it("rejects source admin updates that violate rating and feed invariants", async () => {
+    const store = new InMemorySourcesStore([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        sourceKey: "rss-feed",
+        name: "RSS Feed",
+        sourceType: "rss",
+        feedUrl: "https://feeds.example.test/rss.xml",
+        enabled: true,
+        qualityRating: 3,
+        createdAt: "2026-06-17T10:00:00.000Z",
+        updatedAt: "2026-06-17T10:00:00.000Z"
+      }
+    ]);
+
+    await assert.rejects(() => store.updateSource("11111111-1111-4111-8111-111111111111", { qualityRating: 0 }), /qualityRating must be an integer from 1 to 5/u);
+    await assert.rejects(() => store.updateSource("11111111-1111-4111-8111-111111111111", { feedUrl: null }), /feedUrl is required for RSS\/Atom sources/u);
+    await assert.rejects(() => store.updateSource("missing", { enabled: false }), /source missing was not found/u);
   });
 });
 
@@ -159,6 +236,112 @@ describe("RSS/Atom qualitative ingest", () => {
 });
 
 describe("Postgres qualitative stores", () => {
+  it("implements source admin read, update, and delete operations", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const rows = new Map<string, SourceRow>([
+      [
+        "11111111-1111-4111-8111-111111111111",
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          source_key: "bravo-feed",
+          name: "Bravo Feed",
+          source_type: "rss",
+          feed_url: "https://feeds.example.test/bravo.xml",
+          enabled: false,
+          quality_rating: 2,
+          created_at: "2026-06-17T10:00:00.000Z",
+          updated_at: "2026-06-17T10:00:00.000Z"
+        }
+      ],
+      [
+        "22222222-2222-4222-8222-222222222222",
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          source_key: "alpha-programmatic",
+          name: "Alpha Programmatic",
+          source_type: "programmatic",
+          feed_url: null,
+          enabled: true,
+          quality_rating: 4,
+          created_at: "2026-06-17T10:00:00.000Z",
+          updated_at: "2026-06-17T10:00:00.000Z"
+        }
+      ]
+    ]);
+    const pool = {
+      query: async (text: string, values?: unknown[]) => {
+        queries.push({ text, values });
+
+        if (text.includes("DELETE FROM sources")) {
+          const deleted = rows.delete(String(values?.[0]));
+          return { rows: [], rowCount: deleted ? 1 : 0 };
+        }
+
+        if (text.includes("FROM sources") && text.includes("WHERE id = $1")) {
+          const row = rows.get(String(values?.[0]));
+          return { rows: row ? [row] : [] };
+        }
+
+        if (text.includes("FROM sources") && text.includes("ORDER BY name ASC, id ASC")) {
+          return { rows: [...rows.values()].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)) };
+        }
+
+        if (text.includes("UPDATE sources")) {
+          const id = String(values?.[0]);
+          const existing = rows.get(id);
+
+          if (!existing) {
+            return { rows: [] };
+          }
+
+          const updated: SourceRow = {
+            ...existing,
+            name: String(values?.[1]),
+            feed_url: values?.[2] === null ? null : String(values?.[2]),
+            enabled: Boolean(values?.[3]),
+            quality_rating: Number(values?.[4]),
+            updated_at: "2026-06-17T11:00:00.000Z"
+          };
+          rows.set(id, updated);
+          return { rows: [updated] };
+        }
+
+        return { rows: [] };
+      }
+    } as unknown as Pool;
+    const store = new PostgresSourcesStore(pool);
+
+    const all = await store.listSources();
+    const one = await store.getSource("11111111-1111-4111-8111-111111111111");
+    const updated = await store.updateSource("11111111-1111-4111-8111-111111111111", {
+      name: "Updated Bravo",
+      feedUrl: "https://feeds.example.test/updated.xml",
+      enabled: true,
+      qualityRating: 5
+    });
+    const deleted = await store.deleteSource("11111111-1111-4111-8111-111111111111");
+
+    assert.deepEqual(
+      all.map((source) => [source.sourceKey, source.enabled]),
+      [
+        ["alpha-programmatic", true],
+        ["bravo-feed", false]
+      ]
+    );
+    assert.equal(one?.sourceKey, "bravo-feed");
+    assert.equal(updated.name, "Updated Bravo");
+    assert.equal(updated.feedUrl, "https://feeds.example.test/updated.xml");
+    assert.equal(updated.enabled, true);
+    assert.equal(updated.qualityRating, 5);
+    assert.equal(updated.updatedAt, "2026-06-17T11:00:00.000Z");
+    assert.equal(deleted, true);
+    assert.equal(await store.getSource("11111111-1111-4111-8111-111111111111"), null);
+    const updateQuery = queries.find((query) => query.text.includes("UPDATE sources"));
+    assert.match(queries[0]?.text ?? "", /ORDER BY name ASC, id ASC/u);
+    assert.match(updateQuery?.text ?? "", /updated_at = now\(\)/u);
+    assert.deepEqual(updateQuery?.values, ["11111111-1111-4111-8111-111111111111", "Updated Bravo", "https://feeds.example.test/updated.xml", true, 5]);
+  });
+
   it("use bootstrap SQL and per-source dedup conflict handling", async () => {
     const queries: Array<{ text: string; values?: unknown[] }> = [];
     const sourceRow: SourceRow = {

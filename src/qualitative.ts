@@ -30,9 +30,27 @@ export type CreateSourceInput = {
   qualityRating: number;
 };
 
+export type UpdateSourcePatch = {
+  name?: string;
+  feedUrl?: string | null;
+  enabled?: boolean;
+  qualityRating?: number;
+};
+
 export interface SourcesStore {
   createSource(input: CreateSourceInput): Promise<SourceRecord>;
+  getSource(id: string): Promise<SourceRecord | null>;
+  listSources(): Promise<SourceRecord[]>;
   listEnabledSources(): Promise<SourceRecord[]>;
+  updateSource(id: string, patch: UpdateSourcePatch): Promise<SourceRecord>;
+  deleteSource(id: string): Promise<boolean>;
+}
+
+export class SourceNotFoundError extends Error {
+  constructor(sourceId: string) {
+    super(`source ${sourceId} was not found`);
+    this.name = "SourceNotFoundError";
+  }
 }
 
 export type QualitativeItemInput = {
@@ -131,11 +149,33 @@ export class InMemorySourcesStore implements SourcesStore {
     return cloneSource(source);
   }
 
+  async getSource(id: string): Promise<SourceRecord | null> {
+    const source = this.sources.get(id.trim());
+    return source ? cloneSource(source) : null;
+  }
+
+  async listSources(): Promise<SourceRecord[]> {
+    return sortSources([...this.sources.values()]).map(cloneSource);
+  }
+
   async listEnabledSources(): Promise<SourceRecord[]> {
-    return [...this.sources.values()]
-      .filter((source) => source.enabled)
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map(cloneSource);
+    return sortSources([...this.sources.values()].filter((source) => source.enabled)).map(cloneSource);
+  }
+
+  async updateSource(id: string, patch: UpdateSourcePatch): Promise<SourceRecord> {
+    const source = this.sources.get(id.trim());
+
+    if (!source) {
+      throw new SourceNotFoundError(id);
+    }
+
+    const updated = applySourcePatch(source, patch);
+    this.sources.set(updated.id, cloneSource(updated));
+    return cloneSource(updated);
+  }
+
+  async deleteSource(id: string): Promise<boolean> {
+    return this.sources.delete(id.trim());
   }
 }
 
@@ -164,17 +204,79 @@ export class PostgresSourcesStore implements SourcesStore {
     return rowToSource(result.rows[0]);
   }
 
+  async getSource(id: string): Promise<SourceRecord | null> {
+    const result = await this.pool.query<SourceRow>(
+      `
+        SELECT id, source_key, name, source_type, feed_url, enabled, quality_rating, created_at, updated_at
+        FROM sources
+        WHERE id = $1
+      `,
+      [id.trim()]
+    );
+
+    return result.rows[0] ? rowToSource(result.rows[0]) : null;
+  }
+
+  async listSources(): Promise<SourceRecord[]> {
+    const result = await this.pool.query<SourceRow>(
+      `
+        SELECT id, source_key, name, source_type, feed_url, enabled, quality_rating, created_at, updated_at
+        FROM sources
+        ORDER BY name ASC, id ASC
+      `
+    );
+
+    return result.rows.map(rowToSource);
+  }
+
   async listEnabledSources(): Promise<SourceRecord[]> {
     const result = await this.pool.query<SourceRow>(
       `
         SELECT id, source_key, name, source_type, feed_url, enabled, quality_rating, created_at, updated_at
         FROM sources
         WHERE enabled = true
-        ORDER BY name ASC
+        ORDER BY name ASC, id ASC
       `
     );
 
     return result.rows.map(rowToSource);
+  }
+
+  async updateSource(id: string, patch: UpdateSourcePatch): Promise<SourceRecord> {
+    const existing = await this.getSource(id);
+
+    if (!existing) {
+      throw new SourceNotFoundError(id);
+    }
+
+    const updated = applySourcePatch(existing, patch);
+    const result = await this.pool.query<SourceRow>(
+      `
+        UPDATE sources
+        SET name = $2,
+            feed_url = $3,
+            enabled = $4,
+            quality_rating = $5,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING id, source_key, name, source_type, feed_url, enabled, quality_rating, created_at, updated_at
+      `,
+      [updated.id, updated.name, updated.feedUrl ?? null, updated.enabled, updated.qualityRating]
+    );
+
+    return rowToSource(result.rows[0]);
+  }
+
+  async deleteSource(id: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        DELETE FROM sources
+        WHERE id = $1
+      `,
+      [id.trim()]
+    );
+
+    return (result.rowCount ?? 0) > 0;
   }
 }
 
@@ -428,7 +530,41 @@ function normalizeCreateSourceInput(input: CreateSourceInput): SourceRecord {
     source.feedUrl = input.feedUrl.trim();
   }
 
+  assertSourceFeedUrlInvariant(source);
+
   return source;
+}
+
+function applySourcePatch(source: SourceRecord, patch: UpdateSourcePatch): SourceRecord {
+  const updated: SourceRecord = {
+    ...source,
+    updatedAt: new Date().toISOString()
+  };
+
+  if (patch.name !== undefined) {
+    updated.name = normalizeRequiredString(patch.name, "source name");
+  }
+
+  if (patch.enabled !== undefined) {
+    updated.enabled = patch.enabled;
+  }
+
+  if (patch.qualityRating !== undefined) {
+    updated.qualityRating = normalizeQualityRating(patch.qualityRating);
+  }
+
+  if (Object.hasOwn(patch, "feedUrl")) {
+    const feedUrl = normalizeOptionalFeedUrl(patch.feedUrl);
+
+    if (feedUrl) {
+      updated.feedUrl = feedUrl;
+    } else {
+      delete updated.feedUrl;
+    }
+  }
+
+  assertSourceFeedUrlInvariant(updated);
+  return updated;
 }
 
 function normalizeQualitativeItemInput(input: QualitativeItemInput): QualitativeItem {
@@ -550,6 +686,15 @@ function normalizeSourceKey(value: string): string {
   return normalized;
 }
 
+function normalizeOptionalFeedUrl(value: string | null | undefined): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  const normalized = normalizeWhitespace(value);
+  return normalized || undefined;
+}
+
 function normalizeTicker(value: string): string {
   return value.trim().replace(/^\$/u, "").toUpperCase();
 }
@@ -584,6 +729,16 @@ function validateSourceType(value: string): asserts value is SourceType {
   if (!SOURCE_TYPES.includes(value as SourceType)) {
     throw new Error(`unknown source type ${value}`);
   }
+}
+
+function assertSourceFeedUrlInvariant(source: SourceRecord): void {
+  if (source.sourceType !== "programmatic" && !source.feedUrl) {
+    throw new Error("feedUrl is required for RSS/Atom sources");
+  }
+}
+
+function sortSources(sources: SourceRecord[]): SourceRecord[] {
+  return sources.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
 function recencyStamp(item: QualitativeItem): string {
