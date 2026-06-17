@@ -16,6 +16,15 @@ import type { BrokerAdapter } from "./broker.js";
 import type { QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
 import {
+  SOURCE_TYPES,
+  SourceNotFoundError,
+  type CreateSourceInput,
+  type SourceRecord,
+  type SourcesStore,
+  type SourceType,
+  type UpdateSourcePatch
+} from "./qualitative.js";
+import {
   fallbackStrategyChatReply,
   StrategyChatAgent,
   type StrategyChatMode,
@@ -40,6 +49,7 @@ export type ServerOptions = {
   strategyStore?: StrategyStore;
   strategyChatStore?: StrategyChatStore;
   strategyChatModel?: ReasoningModel;
+  sourcesStore?: SourcesStore;
   staticAssetsDir?: string;
 };
 
@@ -137,6 +147,28 @@ export async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/portal/roster") {
+    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRosterList(response, options.sourcesStore);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/portal/roster") {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRosterCreate(request, response, options.sourcesStore);
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/portal/runtime/start") {
     const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
 
@@ -160,6 +192,29 @@ export async function handleRequest(
   }
 
   const strategyRoute = parseStrategyRoute(url.pathname);
+  const rosterRoute = parseRosterRoute(url.pathname);
+
+  if (request.method === "PATCH" && rosterRoute) {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRosterUpdate(request, response, options.sourcesStore, rosterRoute.id);
+    return;
+  }
+
+  if (request.method === "DELETE" && rosterRoute) {
+    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handleRosterDelete(response, options.sourcesStore, rosterRoute.id);
+    return;
+  }
 
   if (request.method === "GET" && strategyRoute && strategyRoute.action === "chat") {
     const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
@@ -403,6 +458,114 @@ async function writeStrategyMutationResult(
   } catch (error: unknown) {
     writeStrategyError(response, error);
   }
+}
+
+async function handleRosterList(response: ServerResponse, sourcesStore: SourcesStore | undefined): Promise<void> {
+  if (!sourcesStore) {
+    writeJson(response, 503, { error: "sources_store_unavailable" });
+    return;
+  }
+
+  writeJson(response, 200, { sources: await sourcesStore.listSources() });
+}
+
+async function handleRosterCreate(
+  request: IncomingMessage,
+  response: ServerResponse,
+  sourcesStore: SourcesStore | undefined
+): Promise<void> {
+  if (!sourcesStore) {
+    writeJson(response, 503, { error: "sources_store_unavailable" });
+    return;
+  }
+
+  const body = await readSourceJsonBody(response, request);
+
+  if (body === invalidJsonBody) {
+    return;
+  }
+
+  const input = toCreateSourceInput(body);
+
+  if (!input) {
+    writeJson(response, 400, { error: "invalid_source_payload" });
+    return;
+  }
+
+  await writeSourceMutationResult(response, 201, () => sourcesStore.createSource(input));
+}
+
+async function handleRosterUpdate(
+  request: IncomingMessage,
+  response: ServerResponse,
+  sourcesStore: SourcesStore | undefined,
+  sourceId: string
+): Promise<void> {
+  if (!sourcesStore) {
+    writeJson(response, 503, { error: "sources_store_unavailable" });
+    return;
+  }
+
+  const body = await readSourceJsonBody(response, request);
+
+  if (body === invalidJsonBody) {
+    return;
+  }
+
+  const patch = toUpdateSourcePatch(body);
+
+  if (!patch) {
+    writeJson(response, 400, { error: "invalid_source_payload" });
+    return;
+  }
+
+  await writeSourceMutationResult(response, 200, () => sourcesStore.updateSource(sourceId, patch));
+}
+
+async function handleRosterDelete(
+  response: ServerResponse,
+  sourcesStore: SourcesStore | undefined,
+  sourceId: string
+): Promise<void> {
+  if (!sourcesStore) {
+    writeJson(response, 503, { error: "sources_store_unavailable" });
+    return;
+  }
+
+  const deleted = await sourcesStore.deleteSource(sourceId);
+
+  if (!deleted) {
+    writeJson(response, 404, { error: "source_not_found" });
+    return;
+  }
+
+  writeJson(response, 200, { deleted: true });
+}
+
+async function writeSourceMutationResult(
+  response: ServerResponse,
+  successStatus: number,
+  operation: () => Promise<SourceRecord>
+): Promise<void> {
+  try {
+    writeJson(response, successStatus, await operation());
+  } catch (error: unknown) {
+    writeSourceError(response, error);
+  }
+}
+
+function writeSourceError(response: ServerResponse, error: unknown): void {
+  if (error instanceof SourceNotFoundError) {
+    writeJson(response, 404, { error: "source_not_found" });
+    return;
+  }
+
+  if (isSourceConflictError(error)) {
+    writeJson(response, 409, { error: "source_conflict" });
+    return;
+  }
+
+  writeJson(response, 400, { error: "invalid_source_payload" });
 }
 
 async function handleStrategyChatHistory(
@@ -753,6 +916,10 @@ type StrategyRoute = {
   action: string | null;
 };
 
+type RosterRoute = {
+  id: string;
+};
+
 type StrategyAction = (typeof strategyActions)[number];
 
 function parseStrategyRoute(pathname: string): StrategyRoute | null {
@@ -771,6 +938,22 @@ function parseStrategyRoute(pathname: string): StrategyRoute | null {
   return { id, action: parts[3] ?? null };
 }
 
+export function parseRosterRoute(pathname: string): RosterRoute | null {
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (parts[0] !== "portal" || parts[1] !== "roster" || parts.length !== 3) {
+    return null;
+  }
+
+  const id = decodeURIComponent(parts[2] ?? "").trim();
+
+  if (!id) {
+    return null;
+  }
+
+  return { id };
+}
+
 function isStrategyAction(action: string): action is StrategyAction {
   return strategyActions.includes(action as StrategyAction);
 }
@@ -782,6 +965,179 @@ async function readStrategyJsonBody(response: ServerResponse, request: IncomingM
     writeJson(response, 400, { error: "invalid_json" });
     return invalidJsonBody;
   }
+}
+
+async function readSourceJsonBody(response: ServerResponse, request: IncomingMessage): Promise<unknown | typeof invalidJsonBody> {
+  try {
+    return await readJsonBody(request);
+  } catch {
+    writeJson(response, 400, { error: "invalid_json" });
+    return invalidJsonBody;
+  }
+}
+
+function toCreateSourceInput(value: unknown): CreateSourceInput | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const sourceKey = stringField(value, "sourceKey", "source_key");
+  const name = stringField(value, "name");
+  const sourceType = sourceTypeField(value, "sourceType", "source_type");
+  const feedUrl = nullableStringField(value, "feedUrl", "feed_url");
+  const enabled = optionalBooleanField(value, "enabled");
+  const qualityRating = numberField(value, "qualityRating", "quality_rating");
+
+  if (!sourceKey || !name || sourceType === invalidField || feedUrl === invalidField || enabled === invalidField || qualityRating === undefined) {
+    return null;
+  }
+
+  if (sourceType !== undefined && sourceType !== "programmatic" && !feedUrl?.trim()) {
+    return null;
+  }
+
+  if ((sourceType ?? "rss") !== "programmatic" && !feedUrl?.trim()) {
+    return null;
+  }
+
+  return {
+    sourceKey,
+    name,
+    ...(sourceType !== undefined ? { sourceType } : {}),
+    ...(feedUrl !== undefined && feedUrl !== null ? { feedUrl } : {}),
+    ...(enabled !== undefined ? { enabled } : {}),
+    qualityRating
+  };
+}
+
+function toUpdateSourcePatch(value: unknown): UpdateSourcePatch | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const patch: UpdateSourcePatch = {};
+
+  if (hasAnyField(value, "name")) {
+    const name = stringField(value, "name");
+
+    if (!name) {
+      return null;
+    }
+
+    patch.name = name;
+  }
+
+  if (hasAnyField(value, "feedUrl", "feed_url")) {
+    const feedUrl = nullableStringField(value, "feedUrl", "feed_url");
+
+    if (feedUrl === invalidField) {
+      return null;
+    }
+
+    patch.feedUrl = feedUrl;
+  }
+
+  if (hasAnyField(value, "enabled")) {
+    const enabled = optionalBooleanField(value, "enabled");
+
+    if (enabled === invalidField || enabled === undefined) {
+      return null;
+    }
+
+    patch.enabled = enabled;
+  }
+
+  if (hasAnyField(value, "qualityRating", "quality_rating")) {
+    const qualityRating = numberField(value, "qualityRating", "quality_rating");
+
+    if (qualityRating === undefined) {
+      return null;
+    }
+
+    patch.qualityRating = qualityRating;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function stringField(value: Record<string, unknown>, ...keys: string[]): string | undefined {
+  const field = fieldValue(value, ...keys);
+
+  if (field === undefined) {
+    return undefined;
+  }
+
+  return typeof field === "string" ? field : undefined;
+}
+
+function nullableStringField(value: Record<string, unknown>, ...keys: string[]): string | null | undefined | typeof invalidField {
+  const field = fieldValue(value, ...keys);
+
+  if (field === undefined) {
+    return undefined;
+  }
+
+  if (field === null) {
+    return null;
+  }
+
+  return typeof field === "string" ? field : invalidField;
+}
+
+function sourceTypeField(value: Record<string, unknown>, ...keys: string[]): SourceType | undefined | typeof invalidField {
+  const field = fieldValue(value, ...keys);
+
+  if (field === undefined) {
+    return undefined;
+  }
+
+  if (typeof field !== "string" || !SOURCE_TYPES.includes(field as SourceType)) {
+    return invalidField;
+  }
+
+  return field as SourceType;
+}
+
+function optionalBooleanField(value: Record<string, unknown>, ...keys: string[]): boolean | undefined | typeof invalidField {
+  const field = fieldValue(value, ...keys);
+
+  if (field === undefined) {
+    return undefined;
+  }
+
+  return typeof field === "boolean" ? field : invalidField;
+}
+
+function numberField(value: Record<string, unknown>, ...keys: string[]): number | undefined {
+  const field = fieldValue(value, ...keys);
+
+  if (field === undefined) {
+    return undefined;
+  }
+
+  return typeof field === "number" ? field : undefined;
+}
+
+function fieldValue(value: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.hasOwn(value, key)) {
+      return value[key];
+    }
+  }
+
+  return undefined;
+}
+
+function hasAnyField(value: Record<string, unknown>, ...keys: string[]): boolean {
+  return keys.some((key) => Object.hasOwn(value, key));
+}
+
+function isSourceConflictError(error: unknown): boolean {
+  if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+    return true;
+  }
+
+  return error instanceof Error && /already exists|duplicate|unique/iu.test(error.message);
 }
 
 function toCreateStrategyInput(value: unknown): CreateStrategyInput | null {
@@ -933,6 +1289,7 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
 const strategyActions = ["discuss", "return-to-draft", "approve", "activate", "pause", "resume", "retire"] as const;
 const invalidJsonBody = Symbol("invalidJsonBody");
 const invalidStrategyReason = Symbol("invalidStrategyReason");
+const invalidField = Symbol("invalidField");
 const quantPlaybookParameterKeys = [
   "minPrice",
   "minAverageDollarVolume",

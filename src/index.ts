@@ -13,7 +13,7 @@ import {
   SecretsBackedLlmCredentialVault
 } from "./llm.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
-import { ensureQualitativeItemsSchema, ensureSourcesSchema } from "./qualitative.js";
+import { ensureQualitativeItemsSchema, ensureSourcesSchema, PostgresSourcesStore } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
 import { createServer } from "./server.js";
@@ -42,6 +42,7 @@ const server = createServer({
   strategyStore: new PostgresStrategyStore(pool),
   strategyChatStore: new PostgresStrategyChatStore(pool),
   strategyChatModel: withStrategyChatSchemaHints(createReasoningModel(llmCredentialVault, { providerId: OPENAI_OAUTH_PROVIDER_ID })),
+  sourcesStore: new PostgresSourcesStore(pool),
   staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
 });
 

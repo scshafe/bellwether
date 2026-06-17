@@ -18,8 +18,9 @@ import type {
 } from "./broker.js";
 import { InMemoryIdentityProvider, type InMemoryIdentityRecord } from "./identity.js";
 import type { LlmJsonRequest, ReasoningModel } from "./llm.js";
+import { InMemorySourcesStore, type SourceRecord } from "./qualitative.js";
 import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.js";
-import { createServer, type ServerOptions } from "./server.js";
+import { createServer, parseRosterRoute, type ServerOptions } from "./server.js";
 import { InMemoryStrategyStore, type StrategyRecord } from "./strategy.js";
 import { InMemoryStrategyChatStore, type StrategyChatMessage } from "./strategy-chat.js";
 import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
@@ -190,6 +191,30 @@ class RecordingStrategyStore extends InMemoryStrategyStore {
   }
 }
 
+class RecordingSourcesStore extends InMemorySourcesStore {
+  readonly calls: string[] = [];
+
+  override async createSource(input: Parameters<InMemorySourcesStore["createSource"]>[0]): Promise<SourceRecord> {
+    this.calls.push("createSource");
+    return super.createSource(input);
+  }
+
+  override async listSources(): Promise<SourceRecord[]> {
+    this.calls.push("listSources");
+    return super.listSources();
+  }
+
+  override async updateSource(id: string, patch: Parameters<InMemorySourcesStore["updateSource"]>[1]): Promise<SourceRecord> {
+    this.calls.push("updateSource");
+    return super.updateSource(id, patch);
+  }
+
+  override async deleteSource(id: string): Promise<boolean> {
+    this.calls.push("deleteSource");
+    return super.deleteSource(id);
+  }
+}
+
 async function startTestServer(options: ServerOptions = {}): Promise<{ baseUrl: string; server: Server }> {
   const server = createServer(options);
 
@@ -275,6 +300,13 @@ async function patchJson(baseUrl: string, path: string, token: string, body: unk
     method: "PATCH",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body)
+  });
+}
+
+async function deleteJson(baseUrl: string, path: string, token: string): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` }
   });
 }
 
@@ -704,6 +736,180 @@ describe("portal strategy registry API", () => {
       assert.deepEqual(await badReasonResponse.json(), { error: "invalid_strategy_payload" });
       assert.equal(missingResponse.status, 503);
       assert.deepEqual(await missingResponse.json(), { error: "strategy_store_unavailable" });
+    } finally {
+      await closeTestServer(missingStarted.server);
+    }
+  });
+});
+
+describe("portal roster API", () => {
+  let server: Server;
+  let baseUrl = "";
+  let sourcesStore: RecordingSourcesStore;
+  let adminToken = "";
+  let managerToken = "";
+  let viewerToken = "";
+
+  before(async () => {
+    sourcesStore = new RecordingSourcesStore([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        sourceKey: "disabled-rss",
+        name: "Disabled RSS",
+        sourceType: "rss",
+        feedUrl: "https://feeds.example.test/disabled.xml",
+        enabled: false,
+        qualityRating: 2,
+        createdAt: "2026-06-17T10:00:00.000Z",
+        updatedAt: "2026-06-17T10:00:00.000Z"
+      }
+    ]);
+    const started = await startTestServer({ identityProvider: testIdentityProvider(), sourcesStore });
+    server = started.server;
+    baseUrl = started.baseUrl;
+    adminToken = await authenticate(baseUrl, "cole");
+    managerToken = await authenticate(baseUrl, "brother");
+    viewerToken = await authenticate(baseUrl, "family");
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("parses exact roster item routes", () => {
+    assert.deepEqual(parseRosterRoute("/portal/roster/abc-123"), { id: "abc-123" });
+    assert.deepEqual(parseRosterRoute("/portal/roster/%20abc%20123%20"), { id: "abc 123" });
+    assert.equal(parseRosterRoute("/portal/roster"), null);
+    assert.equal(parseRosterRoute("/portal/roster/abc/delete"), null);
+    assert.equal(parseRosterRoute("/portal/strategies/abc"), null);
+  });
+
+  it("lists all sources to viewer-or-higher roles", async () => {
+    const response = await fetch(`${baseUrl}/portal/roster`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    const body = (await response.json()) as { sources?: SourceRecord[] };
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.sources?.map((source) => [source.sourceKey, source.enabled]), [["disabled-rss", false]]);
+  });
+
+  it("creates, updates, and deletes sources through the admin boundary", async () => {
+    const createResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      sourceKey: "curated-rss",
+      name: "Curated RSS",
+      sourceType: "rss",
+      feedUrl: "https://feeds.example.test/rss.xml",
+      enabled: true,
+      qualityRating: 5
+    });
+    const created = (await createResponse.json()) as SourceRecord;
+    const updateResponse = await patchJson(baseUrl, `/portal/roster/${created.id}`, managerToken, {
+      name: "Updated Curated RSS",
+      feed_url: "https://feeds.example.test/updated.xml",
+      enabled: false,
+      quality_rating: 4
+    });
+    const updated = (await updateResponse.json()) as SourceRecord;
+    const deleteResponse = await deleteJson(baseUrl, `/portal/roster/${created.id}`, adminToken);
+    const deleteBody = (await deleteResponse.json()) as { deleted?: boolean };
+    const listResponse = await fetch(`${baseUrl}/portal/roster`, {
+      headers: { authorization: `Bearer ${adminToken}` }
+    });
+    const listBody = (await listResponse.json()) as { sources?: SourceRecord[] };
+
+    assert.equal(createResponse.status, 201);
+    assert.equal(created.sourceKey, "curated-rss");
+    assert.equal(created.sourceType, "rss");
+    assert.equal(created.feedUrl, "https://feeds.example.test/rss.xml");
+    assert.equal(created.enabled, true);
+    assert.equal(updateResponse.status, 200);
+    assert.equal(updated.name, "Updated Curated RSS");
+    assert.equal(updated.feedUrl, "https://feeds.example.test/updated.xml");
+    assert.equal(updated.enabled, false);
+    assert.equal(updated.qualityRating, 4);
+    assert.equal(deleteResponse.status, 200);
+    assert.deepEqual(deleteBody, { deleted: true });
+    assert.equal(listBody.sources?.some((source) => source.id === created.id), false);
+  });
+
+  it("blocks unauthenticated reads and viewer mutations before store access", async () => {
+    const callsBefore = sourcesStore.calls.length;
+    const unauthenticatedRead = await fetch(`${baseUrl}/portal/roster`);
+    const viewerCreate = await postJson(baseUrl, "/portal/roster", viewerToken, {
+      sourceKey: "viewer-create",
+      name: "Viewer Create",
+      feedUrl: "https://feeds.example.test/viewer.xml",
+      qualityRating: 3
+    });
+    const viewerPatch = await patchJson(baseUrl, "/portal/roster/11111111-1111-4111-8111-111111111111", viewerToken, {
+      enabled: true
+    });
+    const viewerDelete = await deleteJson(baseUrl, "/portal/roster/11111111-1111-4111-8111-111111111111", viewerToken);
+
+    assert.equal(unauthenticatedRead.status, 401);
+    assert.deepEqual(await unauthenticatedRead.json(), { error: "missing_session" });
+    assert.equal(viewerCreate.status, 403);
+    assert.deepEqual(await viewerCreate.json(), { error: "forbidden" });
+    assert.equal(viewerPatch.status, 403);
+    assert.deepEqual(await viewerPatch.json(), { error: "forbidden" });
+    assert.equal(viewerDelete.status, 403);
+    assert.deepEqual(await viewerDelete.json(), { error: "forbidden" });
+    assert.equal(sourcesStore.calls.length, callsBefore);
+  });
+
+  it("maps invalid payloads, unknown ids, duplicate keys, and missing dependencies", async () => {
+    const badRatingResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      source_key: "bad-rating",
+      name: "Bad Rating",
+      feed_url: "https://feeds.example.test/bad-rating.xml",
+      quality_rating: 6
+    });
+    const badTypeResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      source_key: "bad-type",
+      name: "Bad Type",
+      source_type: "x-handle",
+      quality_rating: 3
+    });
+    const badFeedResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      source_key: "bad-feed",
+      name: "Bad Feed",
+      source_type: "atom",
+      quality_rating: 3
+    });
+    const duplicateResponse = await postJson(baseUrl, "/portal/roster", adminToken, {
+      source_key: "disabled-rss",
+      name: "Duplicate",
+      source_type: "rss",
+      feed_url: "https://feeds.example.test/duplicate.xml",
+      quality_rating: 3
+    });
+    const unknownPatchResponse = await patchJson(baseUrl, "/portal/roster/99999999-9999-4999-8999-999999999999", adminToken, {
+      enabled: false
+    });
+    const unknownDeleteResponse = await deleteJson(baseUrl, "/portal/roster/99999999-9999-4999-8999-999999999999", adminToken);
+    const missingStarted = await startTestServer({ identityProvider: testIdentityProvider() });
+
+    try {
+      const token = await authenticate(missingStarted.baseUrl, "cole");
+      const missingResponse = await fetch(`${missingStarted.baseUrl}/portal/roster`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+
+      assert.equal(badRatingResponse.status, 400);
+      assert.deepEqual(await badRatingResponse.json(), { error: "invalid_source_payload" });
+      assert.equal(badTypeResponse.status, 400);
+      assert.deepEqual(await badTypeResponse.json(), { error: "invalid_source_payload" });
+      assert.equal(badFeedResponse.status, 400);
+      assert.deepEqual(await badFeedResponse.json(), { error: "invalid_source_payload" });
+      assert.equal(duplicateResponse.status, 409);
+      assert.deepEqual(await duplicateResponse.json(), { error: "source_conflict" });
+      assert.equal(unknownPatchResponse.status, 404);
+      assert.deepEqual(await unknownPatchResponse.json(), { error: "source_not_found" });
+      assert.equal(unknownDeleteResponse.status, 404);
+      assert.deepEqual(await unknownDeleteResponse.json(), { error: "source_not_found" });
+      assert.equal(missingResponse.status, 503);
+      assert.deepEqual(await missingResponse.json(), { error: "sources_store_unavailable" });
     } finally {
       await closeTestServer(missingStarted.server);
     }
