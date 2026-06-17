@@ -505,7 +505,8 @@ tr:last-child td {
 
 .parameter-input-grid label,
 .strategy-edit-grid label,
-.chat-composer label {
+.chat-composer label,
+.source-controls label {
   display: grid;
   gap: 0.35rem;
   color: #cbd5e1;
@@ -541,6 +542,24 @@ tr:last-child td {
 
 .strategy-actions {
   margin-top: 0.75rem;
+}
+
+.source-controls {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.65rem;
+  align-items: end;
+  margin-top: 0.75rem;
+}
+
+.source-toggle {
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: start;
+}
+
+.source-toggle input {
+  width: auto;
 }
 
 .status-badge {
@@ -669,7 +688,8 @@ tr:last-child td {
   .strategy-grid,
   .strategy-edit-grid,
   .strategy-chat-layout,
-  .chat-composer {
+  .chat-composer,
+  .source-controls {
     grid-template-columns: 1fr;
   }
 

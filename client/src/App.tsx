@@ -5,6 +5,19 @@ import { createSession, setPassword, setUsername, signOut } from "./store/authSl
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
+import {
+  createSource,
+  deleteSource,
+  fetchRoster,
+  rosterSelectors,
+  updateSource,
+  updateSourceCreateDraftField,
+  updateSourceCreateDraftRating,
+  updateSourceCreateDraftType,
+  type SourceCreateDraft,
+  type SourceRecord,
+  type SourceType
+} from "./store/rosterSlice";
 import { fetchRuntimeStatus, startAgentRuntime, stopAgentRuntime, type RuntimeStateSnapshot } from "./store/runtimeSlice";
 import {
   clearStrategyEditDraft,
@@ -39,6 +52,7 @@ import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
   { id: "positions", label: "Positions + P&L", status: "live" },
   { id: "decisions", label: "Decision Log", status: "live" },
+  { id: "roster", label: "Analyst Roster", status: "P7c" },
   { id: "strategies", label: "Strategy Workbench", status: "P6d" },
   { id: "control", label: "Agent Control", status: "P4d" }
 ];
@@ -57,6 +71,7 @@ export function App(): ReactElement {
       .then(() => {
         void dispatch(fetchPortalPositions());
         void dispatch(fetchPortalDecisions());
+        void dispatch(fetchRoster());
         void dispatch(fetchRuntimeStatus());
         void dispatch(fetchPortalStrategies());
       });
@@ -116,6 +131,7 @@ export function App(): ReactElement {
           </nav>
 
           {activeTab === "decisions" ? <DecisionsWorkspace /> : null}
+          {activeTab === "roster" ? <RosterWorkspace canManageRoster={canManageRuntime} /> : null}
           {activeTab === "strategies" ? <StrategiesWorkspace canManageStrategies={canManageRuntime} /> : null}
           {activeTab === "control" && canManageRuntime ? <ControlWorkspace /> : null}
           {activeTab === "positions" || (activeTab === "control" && !canManageRuntime) ? <PositionsWorkspace /> : null}
@@ -487,6 +503,144 @@ function ControlWorkspace(): ReactElement {
       {snapshot ? <RuntimeStatusCard snapshot={snapshot} /> : <p className="empty">No runtime status loaded yet. Use Refresh.</p>}
       <p className="muted">Start enqueues exactly one live paper-trading cycle. Use the Decision Log refresh after the worker completes to see the persisted glass-box entry.</p>
     </section>
+  );
+}
+
+function RosterWorkspace({ canManageRoster }: { canManageRoster: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const sources = useAppSelector(rosterSelectors.selectAll);
+  const status = useAppSelector((state) => state.roster.status);
+  const mutationStatus = useAppSelector((state) => state.roster.mutationStatus);
+  const error = useAppSelector((state) => state.roster.error);
+  const refreshedAt = useAppSelector((state) => state.roster.refreshedAt);
+  const draft = useAppSelector((state) => state.roster.createDraft);
+  const busy = status === "loading" || mutationStatus === "loading";
+
+  const submitCreate = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (canManageRoster) {
+      void dispatch(createSource(draft));
+    }
+  };
+
+  return (
+    <section className="panel strategies-workbench">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">GET /portal/roster</p>
+          <h2>Analyst Roster</h2>
+        </div>
+        <button type="button" className="ghost" onClick={() => dispatch(fetchRoster())} disabled={busy}>
+          {status === "loading" ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
+
+      {error ? <p className="error">{error}</p> : null}
+      {refreshedAt ? <p className="muted">Roster refreshed {formatDateTime(refreshedAt)}</p> : null}
+      {!canManageRoster ? <p className="muted">Viewer session: roster is read-only. Source management controls are hidden.</p> : null}
+
+      {canManageRoster ? <SourceCreateForm draft={draft} busy={mutationStatus === "loading"} onSubmit={submitCreate} /> : null}
+
+      {sources.length === 0 ? (
+        <p className="empty">No sources returned. Use Refresh or add the first analyst source.</p>
+      ) : (
+        <div className="strategy-grid roster-grid">
+          {sources.map((source) => (
+            <SourceCard key={source.id} source={source} canManageRoster={canManageRoster} busy={mutationStatus === "loading"} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SourceCreateForm({ draft, busy, onSubmit }: { draft: SourceCreateDraft; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }): ReactElement {
+  const dispatch = useAppDispatch();
+  const needsFeedUrl = draft.sourceType === "rss" || draft.sourceType === "atom";
+  const valid = draft.sourceKey.trim() && draft.name.trim() && (!needsFeedUrl || draft.feedUrl.trim());
+
+  return (
+    <form className="login-panel strategy-form roster-form" onSubmit={onSubmit}>
+      <div>
+        <p className="eyebrow">POST /portal/roster</p>
+        <h2>Add Source</h2>
+        <p className="muted">Source keys must be unique; RSS and Atom sources require a feed URL.</p>
+      </div>
+      <label>
+        Source Key
+        <input value={draft.sourceKey} onChange={(event) => dispatch(updateSourceCreateDraftField({ field: "sourceKey", value: event.currentTarget.value }))} required />
+      </label>
+      <label>
+        Name
+        <input value={draft.name} onChange={(event) => dispatch(updateSourceCreateDraftField({ field: "name", value: event.currentTarget.value }))} required />
+      </label>
+      <label>
+        Type
+        <select value={draft.sourceType} onChange={(event) => dispatch(updateSourceCreateDraftType(event.currentTarget.value as SourceType))}>
+          {sourceTypes.map((type) => <option key={type} value={type}>{formatSourceType(type)}</option>)}
+        </select>
+      </label>
+      {needsFeedUrl ? (
+        <label>
+          Feed URL
+          <input type="url" value={draft.feedUrl} onChange={(event) => dispatch(updateSourceCreateDraftField({ field: "feedUrl", value: event.currentTarget.value }))} required />
+        </label>
+      ) : null}
+      <label>
+        Quality Rating
+        <select value={draft.qualityRating} onChange={(event) => dispatch(updateSourceCreateDraftRating(Number(event.currentTarget.value)))}>
+          {qualityRatings.map((rating) => <option key={rating} value={rating}>{rating}</option>)}
+        </select>
+      </label>
+      <button type="submit" disabled={busy || !valid}>{busy ? "Adding..." : "Add Source"}</button>
+    </form>
+  );
+}
+
+function SourceCard({ source, canManageRoster, busy }: { source: SourceRecord; canManageRoster: boolean; busy: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+
+  return (
+    <article className="decision-card strategy-card source-card">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">Source</p>
+          <h3>{source.name}</h3>
+        </div>
+        <div className="id-stack">
+          <span className={`status-badge source-${source.sourceType}`}>{formatSourceType(source.sourceType)}</span>
+          <code>{source.sourceKey}</code>
+        </div>
+      </header>
+
+      {source.feedUrl ? <p className="muted">{source.feedUrl}</p> : <p className="muted">Programmatic source; no feed URL.</p>}
+      <div className="decision-meta">
+        <Meta label="Quality" value={`${source.qualityRating}/5`} />
+        <Meta label="Enabled" value={source.enabled ? "yes" : "no"} />
+        <Meta label="Updated" value={formatDateTime(source.updatedAt)} />
+        <Meta label="Created" value={formatDateTime(source.createdAt)} />
+      </div>
+      {canManageRoster ? (
+        <div className="source-controls">
+          <label>
+            Quality Rating
+            <select value={source.qualityRating} onChange={(event) => dispatch(updateSource({ id: source.id, qualityRating: Number(event.currentTarget.value) }))} disabled={busy}>
+              {qualityRatings.map((rating) => <option key={rating} value={rating}>{rating}</option>)}
+            </select>
+          </label>
+          <label className="source-toggle">
+            <input
+              type="checkbox"
+              checked={source.enabled}
+              onChange={(event) => dispatch(updateSource({ id: source.id, enabled: event.currentTarget.checked }))}
+              disabled={busy}
+            />
+            Enabled
+          </label>
+          <button type="button" className="danger" onClick={() => dispatch(deleteSource(source.id))} disabled={busy}>Remove</button>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -899,6 +1053,10 @@ function formatStatus(status: StrategyStatus): string {
   return status.replace(/_/g, " ");
 }
 
+function formatSourceType(sourceType: SourceType): string {
+  return sourceType.replace(/-/g, " ");
+}
+
 function lifecycleActionLabel(action: StrategyAction): string {
   switch (action) {
     case "discuss":
@@ -926,3 +1084,6 @@ const lifecycleActions: Record<StrategyStatus, StrategyAction[]> = {
   paused: ["resume", "retire"],
   retired: []
 };
+
+const sourceTypes: SourceType[] = ["rss", "atom", "programmatic"];
+const qualityRatings = [1, 2, 3, 4, 5];
