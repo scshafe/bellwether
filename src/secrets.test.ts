@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
 
-import { InMemorySecretsStore, SecretsBackedBrokerCredentialVault, SecretsBackedXApiCredentialVault } from "./secrets.js";
+import { createXApiSecretsStore, InMemorySecretsStore, SecretsBackedBrokerCredentialVault, SecretsBackedXApiCredentialVault } from "./secrets.js";
 
 describe("InMemorySecretsStore", () => {
   it("stores and reads secrets by name", async () => {
@@ -52,5 +55,17 @@ describe("SecretsBackedXApiCredentialVault", () => {
     const vault = new SecretsBackedXApiCredentialVault(store);
 
     assert.deepEqual(await vault.getXApiCredential(), { bearerToken: "placeholder-x-bearer-token" });
+  });
+
+  it("loads a mounted X API bearer token file and treats an absent file as no credential", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bellwether-x-api-"));
+    const filePath = join(directory, "x-api.env");
+    await writeFile(filePath, "X_BEARER_TOKEN=placeholder-file-token\n");
+
+    const present = await createXApiSecretsStore({ filePath });
+    const missing = await createXApiSecretsStore({ filePath: join(directory, "missing.env") });
+
+    assert.deepEqual(await new SecretsBackedXApiCredentialVault(present).getXApiCredential(), { bearerToken: "placeholder-file-token" });
+    assert.equal(await new SecretsBackedXApiCredentialVault(missing).getXApiCredential(), null);
   });
 });

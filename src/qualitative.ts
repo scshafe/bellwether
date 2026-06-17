@@ -108,7 +108,7 @@ export type RssAtomIngestPollerOptions = {
 export const ALPACA_NEWS_SOURCE_ID = "77777777-7777-4777-8777-777777777777";
 export const ALPACA_NEWS_SOURCE_KEY = "alpaca-news";
 
-const EXCERPT_MAX_CHARS = 240;
+export const QUALITATIVE_EXCERPT_MAX_CHARS = 240;
 const TICKER_STOPWORDS = new Set([
   "A",
   "AN",
@@ -591,11 +591,11 @@ function normalizeQualitativeItemInput(input: QualitativeItemInput): Qualitative
 function shortExcerpt(value: string): string {
   const normalized = normalizeWhitespace(decodeXml(stripHtml(stripCdata(value))));
 
-  if (normalized.length <= EXCERPT_MAX_CHARS) {
+  if (normalized.length <= QUALITATIVE_EXCERPT_MAX_CHARS) {
     return normalized;
   }
 
-  const sliced = normalized.slice(0, EXCERPT_MAX_CHARS - 3).trimEnd();
+  const sliced = normalized.slice(0, QUALITATIVE_EXCERPT_MAX_CHARS - 3).trimEnd();
   return `${sliced}...`;
 }
 
