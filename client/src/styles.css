@@ -231,6 +231,45 @@ code {
   text-overflow: ellipsis;
 }
 
+.strategy-performance-panel {
+  display: grid;
+  gap: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.95rem;
+  background: rgba(2, 6, 23, 0.38);
+  margin: 0.85rem 0;
+  padding: 0.9rem;
+}
+
+.strategy-performance-panel h3,
+.strategy-performance-card h4 {
+  margin: 0;
+}
+
+.strategy-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.strategy-performance-card {
+  border: 1px solid rgba(94, 234, 212, 0.2);
+  border-radius: 0.9rem;
+  background: linear-gradient(135deg, rgba(15, 118, 110, 0.18), rgba(15, 23, 42, 0.72));
+  padding: 0.78rem;
+}
+
+.strategy-performance-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+.compact-meta {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .gain strong,
 .gain-text {
   color: #86efac;
@@ -677,6 +716,12 @@ tr:last-child td {
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategy-performance-grid,
+  .strategy-performance-metrics,
+  .compact-meta {
+    grid-template-columns: 1fr;
   }
 
   .decision-card-header,

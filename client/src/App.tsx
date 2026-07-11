@@ -4,7 +4,7 @@ import { quantPlaybookParameterKeys, type QuantPlaybookParameterKey, type QuantP
 import { createSession, setPassword, setUsername, signOut } from "./store/authSlice";
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
-import { fetchPortalPositions, positionsSelectors, type PortalAccount, type PortalPosition } from "./store/positionsSlice";
+import { fetchPortalPositions, positionsSelectors, strategyPerformanceSelectors, type PortalAccount, type PortalPosition, type PortalStrategyPerformanceSummary } from "./store/positionsSlice";
 import { acceptProposal, dismissProposal, fetchPortalProposals, proposalsSelectors, type StrategyProposalRecord } from "./store/proposalsSlice";
 import {
   createSource,
@@ -504,13 +504,14 @@ function PositionsWorkspace(): ReactElement {
   const error = useAppSelector((state) => state.positions.error);
   const refreshedAt = useAppSelector((state) => state.positions.refreshedAt);
   const positions = useAppSelector(positionsSelectors.selectAll);
+  const strategySummaries = useAppSelector(strategyPerformanceSelectors.selectAll);
 
   return (
     <section className="panel">
       <header className="panel-header">
         <div>
           <p className="eyebrow">GET /portal/positions</p>
-          <h2>Positions + Daily P&amp;L</h2>
+          <h2>Positions + Strategy P&amp;L</h2>
         </div>
         <button type="button" onClick={() => dispatch(fetchPortalPositions())} disabled={status === "loading"}>
           {status === "loading" ? "Refreshing..." : "Refresh"}
@@ -521,7 +522,58 @@ function PositionsWorkspace(): ReactElement {
       {refreshedAt ? <p className="muted">Last refresh {new Date(refreshedAt).toLocaleString()}</p> : null}
 
       {account ? <AccountGrid account={account} /> : <p className="empty">No account snapshot loaded yet. Use Refresh.</p>}
+      <StrategyPerformancePanel summaries={strategySummaries} />
       <PositionsTable positions={positions} />
+    </section>
+  );
+}
+
+function StrategyPerformancePanel({ summaries }: { summaries: PortalStrategyPerformanceSummary[] }): ReactElement {
+  if (summaries.length === 0) {
+    return (
+      <section className="strategy-performance-panel">
+        <div>
+          <p className="eyebrow">Per-Strategy Paper P&amp;L</p>
+          <h3>Strategy Equity Summary</h3>
+        </div>
+        <p className="empty">No strategy-linked paper decision snapshots yet. Run or refresh after an agent cycle records a decision.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="strategy-performance-panel">
+      <div>
+        <p className="eyebrow">Per-Strategy Paper P&amp;L</p>
+        <h3>Strategy Equity Summary</h3>
+        <p className="muted">Read-only attribution from existing paper positions and the latest strategy-linked decision snapshot.</p>
+      </div>
+      <div className="strategy-performance-grid">
+        {summaries.map((summary) => (
+          <article key={summary.id} className="strategy-performance-card">
+            <header className="decision-card-header">
+              <div>
+                <p className="eyebrow">{summary.symbol}</p>
+                <h4>{summary.strategyName ?? "Strategy"}</h4>
+              </div>
+              <div className="id-stack">
+                {summary.strategyStatus ? <span className={`status-badge status-${summary.strategyStatus}`}>{summary.strategyStatus}</span> : null}
+                <code>{summary.strategyId}</code>
+              </div>
+            </header>
+            <div className="strategy-performance-metrics">
+              <Metric label="Equity" value={formatMoney(summary.equity)} raw={summary.equity} />
+              <Metric label="Unrealized P&L" value={formatMoney(summary.unrealizedPl)} raw={summary.unrealizedPl} tone={Number(summary.unrealizedPl) >= 0 ? "gain" : "loss"} />
+              <Metric label="Portfolio Weight" value={formatPercent(summary.portfolioWeight)} raw={summary.portfolioWeight} />
+            </div>
+            <div className="decision-meta compact-meta">
+              <Meta label="Last Decision" value={formatDateTime(summary.lastDecisionAt)} />
+              <Meta label="Decision ID" value={summary.lastDecisionId} />
+              <Meta label="Execution" value={summary.lastExecutionDecision} />
+            </div>
+          </article>
+        ))}
+      </div>
     </section>
   );
 }

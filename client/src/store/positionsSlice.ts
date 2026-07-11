@@ -23,9 +23,26 @@ export type PortalPosition = {
   unrealizedPlpc?: string;
 };
 
+export type PortalStrategyPerformanceSummary = {
+  id: string;
+  strategyId: string;
+  strategyName?: string;
+  strategyStatus?: string;
+  symbol: string;
+  marketValue: string;
+  equity: string;
+  unrealizedPl: string;
+  unrealizedPlpc?: string;
+  portfolioWeight: string;
+  lastDecisionAt: string;
+  lastDecisionId: string;
+  lastExecutionDecision: string;
+};
+
 type PortalPositionsResponse = {
   account: PortalAccount;
   positions: PortalPosition[];
+  strategySummaries: PortalStrategyPerformanceSummary[];
 };
 
 const positionsAdapter = createEntityAdapter<PortalPosition, string>({
@@ -33,8 +50,14 @@ const positionsAdapter = createEntityAdapter<PortalPosition, string>({
   sortComparer: (left, right) => left.symbol.localeCompare(right.symbol)
 });
 
+const strategySummariesAdapter = createEntityAdapter<PortalStrategyPerformanceSummary, string>({
+  selectId: (summary) => summary.id,
+  sortComparer: (left, right) => right.lastDecisionAt.localeCompare(left.lastDecisionAt) || left.strategyId.localeCompare(right.strategyId)
+});
+
 const initialState = positionsAdapter.getInitialState({
   account: null as PortalAccount | null,
+  strategySummaries: strategySummariesAdapter.getInitialState(),
   status: "idle" as "idle" | "loading" | "succeeded" | "failed",
   error: null as string | null,
   refreshedAt: null as string | null
@@ -77,6 +100,7 @@ const positionsSlice = createSlice({
         state.account = action.payload.account;
         state.refreshedAt = new Date().toISOString();
         positionsAdapter.setAll(state, action.payload.positions);
+        strategySummariesAdapter.setAll(state.strategySummaries, action.payload.strategySummaries);
       })
       .addCase(fetchPortalPositions.rejected, (state, action) => {
         state.status = "failed";
@@ -86,4 +110,5 @@ const positionsSlice = createSlice({
 });
 
 export const positionsSelectors = positionsAdapter.getSelectors<RootState>((state) => state.positions);
+export const strategyPerformanceSelectors = strategySummariesAdapter.getSelectors<RootState>((state) => state.positions.strategySummaries);
 export default positionsSlice.reducer;

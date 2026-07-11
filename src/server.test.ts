@@ -600,6 +600,14 @@ describe("portal read API", () => {
 
   before(async () => {
     const decisionLogStore = new InMemoryAgentDecisionLogStore();
+    const strategyStore = new InMemoryStrategyStore();
+    const strategy = await strategyStore.createStrategy({
+      id: "33333333-3333-3333-8333-333333333333",
+      name: "Cycle-A paper momentum",
+      parameters: strategyParameters()
+    });
+    await strategyStore.approveStrategy(strategy.id);
+    await strategyStore.activateStrategy(strategy.id);
 
     await decisionLogStore.recordDecision({
       id: "11111111-1111-4111-8111-111111111111",
@@ -675,7 +683,8 @@ describe("portal read API", () => {
     const started = await startTestServer({
       identityProvider: testIdentityProvider(),
       broker: new StubBrokerAdapter(),
-      decisionLogStore
+      decisionLogStore,
+      strategyStore
     });
     server = started.server;
     baseUrl = started.baseUrl;
@@ -698,6 +707,38 @@ describe("portal read API", () => {
     assert.equal(body.positions?.[0]?.symbol, "AAPL");
     assert.equal(body.positions?.[0]?.unrealizedPl, "5.00");
     assert.equal(body.positions?.[0]?.unrealizedPlpc, "0.0263");
+  });
+
+  it("returns per-strategy paper P&L and equity summaries from existing snapshots", async () => {
+    const token = await authenticate(baseUrl, "family");
+    const response = await fetch(`${baseUrl}/portal/positions`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const body = (await response.json()) as {
+      strategySummaries?: Array<{
+        strategyId: string;
+        strategyName?: string;
+        strategyStatus?: string;
+        symbol: string;
+        equity: string;
+        unrealizedPl: string;
+        portfolioWeight: string;
+        lastDecisionId: string;
+        lastExecutionDecision: string;
+      }>;
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(body.strategySummaries?.length, 1);
+    assert.equal(body.strategySummaries?.[0]?.strategyId, "33333333-3333-3333-8333-333333333333");
+    assert.equal(body.strategySummaries?.[0]?.strategyName, "Cycle-A paper momentum");
+    assert.equal(body.strategySummaries?.[0]?.strategyStatus, "active");
+    assert.equal(body.strategySummaries?.[0]?.symbol, "AAPL");
+    assert.equal(body.strategySummaries?.[0]?.equity, "195.00");
+    assert.equal(body.strategySummaries?.[0]?.unrealizedPl, "5.00");
+    assert.equal(body.strategySummaries?.[0]?.portfolioWeight, String(195 / 20025));
+    assert.equal(body.strategySummaries?.[0]?.lastDecisionId, "22222222-2222-4222-8222-222222222222");
+    assert.equal(body.strategySummaries?.[0]?.lastExecutionDecision, "placed");
   });
 
   it("returns bounded newest-first glass-box decisions to viewer-or-higher roles", async () => {

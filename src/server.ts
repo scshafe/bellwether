@@ -11,8 +11,8 @@ import {
   type IdentityProvider,
   type Role
 } from "./identity.js";
-import type { AgentDecisionLogStore } from "./agent-team.js";
-import type { BrokerAdapter } from "./broker.js";
+import type { AgentDecisionLogEntry, AgentDecisionLogStore } from "./agent-team.js";
+import type { BrokerAccount, BrokerAdapter, BrokerPosition } from "./broker.js";
 import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
 import type { AgentRuntimeControl } from "./runtime-control.js";
 import { isFeatureEnabled } from "./config.js";
@@ -108,7 +108,7 @@ export async function handleRequest(
       return;
     }
 
-    await handlePortalPositions(response, options.broker);
+    await handlePortalPositions(response, options.broker, options.decisionLogStore, options.strategyStore);
     return;
   }
 
@@ -340,14 +340,99 @@ async function handleSessionCreate(
   writeJson(response, 200, session);
 }
 
-async function handlePortalPositions(response: ServerResponse, broker?: BrokerAdapter): Promise<void> {
+async function handlePortalPositions(
+  response: ServerResponse,
+  broker?: BrokerAdapter,
+  decisionLogStore?: AgentDecisionLogStore,
+  strategyStore?: StrategyStore
+): Promise<void> {
   if (!broker) {
     writeJson(response, 503, { error: "broker_unavailable" });
     return;
   }
 
-  const [account, positions] = await Promise.all([broker.getAccount(), broker.getPositions()]);
-  writeJson(response, 200, { account, positions });
+  const [account, positions, decisions, strategies] = await Promise.all([
+    broker.getAccount(),
+    broker.getPositions(),
+    decisionLogStore?.listDecisions(250) ?? Promise.resolve([]),
+    strategyStore?.listStrategies(250) ?? Promise.resolve([])
+  ]);
+  writeJson(response, 200, {
+    account,
+    positions,
+    strategySummaries: buildStrategyPerformanceSummaries({ account, positions, decisions, strategies })
+  });
+}
+
+export type PortalStrategyPerformanceSummary = {
+  id: string;
+  strategyId: string;
+  strategyName?: string;
+  strategyStatus?: StrategyRecord["status"];
+  symbol: string;
+  marketValue: string;
+  equity: string;
+  unrealizedPl: string;
+  unrealizedPlpc?: string;
+  portfolioWeight: string;
+  lastDecisionAt: string;
+  lastDecisionId: string;
+  lastExecutionDecision: string;
+};
+
+function buildStrategyPerformanceSummaries(input: {
+  account: BrokerAccount;
+  positions: BrokerPosition[];
+  decisions: AgentDecisionLogEntry[];
+  strategies: StrategyRecord[];
+}): PortalStrategyPerformanceSummary[] {
+  const currentPositionsBySymbol = new Map(input.positions.map((position) => [position.symbol, position]));
+  const strategiesById = new Map(input.strategies.map((strategy) => [strategy.id, strategy]));
+  const latestDecisionByStrategy = new Map<string, AgentDecisionLogEntry>();
+
+  for (const decision of input.decisions) {
+    const previous = latestDecisionByStrategy.get(decision.strategyId);
+
+    if (!previous || decision.createdAt.localeCompare(previous.createdAt) > 0) {
+      latestDecisionByStrategy.set(decision.strategyId, decision);
+    }
+  }
+
+  return [...latestDecisionByStrategy.values()]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map((decision) => {
+      const strategy = strategiesById.get(decision.strategyId);
+      const symbol = decision.execution.order?.symbol ?? decision.strategyAnalyst.proposedOrder.symbol ?? decision.quantSignal.symbol;
+      const position = currentPositionsBySymbol.get(symbol) ?? decision.brokerSnapshot.positions.find((candidate) => candidate.symbol === symbol);
+      const marketValue = position?.marketValue ?? "0";
+      const unrealizedPl = position?.unrealizedPl ?? "0";
+
+      return {
+        id: decision.strategyId,
+        strategyId: decision.strategyId,
+        ...(strategy ? { strategyName: strategy.name, strategyStatus: strategy.status } : {}),
+        symbol,
+        marketValue,
+        equity: marketValue,
+        unrealizedPl,
+        ...(position?.unrealizedPlpc ? { unrealizedPlpc: position.unrealizedPlpc } : {}),
+        portfolioWeight: decimalRatioString(marketValue, input.account.equity),
+        lastDecisionAt: decision.createdAt,
+        lastDecisionId: decision.id,
+        lastExecutionDecision: decision.execution.decision
+      };
+    });
+}
+
+function decimalRatioString(numerator: string, denominator: string): string {
+  const parsedNumerator = Number(numerator);
+  const parsedDenominator = Number(denominator);
+
+  if (!Number.isFinite(parsedNumerator) || !Number.isFinite(parsedDenominator) || parsedDenominator === 0) {
+    return "0";
+  }
+
+  return String(parsedNumerator / parsedDenominator);
 }
 
 async function handlePortalDecisions(
