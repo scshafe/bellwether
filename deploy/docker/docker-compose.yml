@@ -1,10 +1,12 @@
-# Bellwether — self-contained tailnet deployment (Mac / Colima).
+# Bellwether — self-contained tailnet deployment (Mac / Docker Desktop).
 #
 # Brings up the portal server + worker + its own Postgres on a private network.
-# The server is published on the host loopback (127.0.0.1:17893); a host-side
-# `tailscale serve` (see deploy/README) fronts it onto the tailnet at
+# The server remains published on host loopback (127.0.0.1:17893), where the
+# existing host-side `tailscale serve` fronts it onto the tailnet at
 #   https://elrics-mac-mini.tail49736b.ts.net:8443
-# using the Mac's existing Tailscale identity (no sidecar / no new auth key).
+# as a migration fallback. The `tailscale` sidecar gives Bellwether its own
+# tailnet identity and preferred URL:
+#   https://bellwether.tail49736b.ts.net
 #
 # Secrets come from a gitignored .env (passwords) + read-only bind mounts of the
 # canonical agent-resources credential files (PAPER only). PAPER MONEY ONLY.
@@ -68,6 +70,30 @@ services:
       retries: 5
       start_period: 25s
 
+  # Independent workload identity for Bellwether. Tailscale Serve terminates
+  # tailnet HTTPS inside this sidecar and proxies over the private Compose
+  # network to `server:3000`. The app itself remains unreachable from the LAN.
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: bellwether-tailscale
+    hostname: bellwether
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: bellwether
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      # Preserve Docker's embedded DNS so the Serve proxy resolves `server`.
+      TS_ACCEPT_DNS: "false"
+      TS_SERVE_CONFIG: /config/tailscale-serve.json
+      TS_ENABLE_HEALTH_CHECK: "true"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/tailscale-serve.json:ro
+
   worker:
     image: bellwether:latest
     container_name: bellwether-worker
@@ -95,3 +121,5 @@ services:
 
 volumes:
   db-data:
+  # Device keys and node identity. Do not delete during ordinary redeployments.
+  tailscale-state:

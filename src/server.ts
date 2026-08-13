@@ -9,7 +9,8 @@ import {
   type AuthCredentials,
   type AuthenticatedUser,
   type IdentityProvider,
-  type Role
+  type Role,
+  type TrustedProxyAuthConfig
 } from "./identity.js";
 import type { AgentDecisionLogEntry, AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAccount, BrokerAdapter, BrokerPosition } from "./broker.js";
@@ -60,6 +61,10 @@ export type ServerOptions = {
   sourcesStore?: SourcesStore;
   env?: NodeJS.ProcessEnv;
   staticAssetsDir?: string;
+  /** When set, an OIDC reverse proxy owns authentication: requireRole trusts
+   *  ONLY the configured identity header (never Bearer tokens) and the
+   *  password login route returns 404. See identity.ts. */
+  trustedProxyAuth?: TrustedProxyAuthConfig;
 };
 
 export async function handleRequest(
@@ -75,12 +80,20 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/auth/session") {
+    if (options.trustedProxyAuth) {
+      // Proxy-identity mode: the password lane must be structurally
+      // unreachable — the identity provider is never consulted, so no
+      // password session can ever be minted while the flag is on.
+      writeJson(response, 404, { error: "not_found" });
+      return;
+    }
+
     await handleSessionCreate(request, response, options.identityProvider);
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/admin/roles") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -91,7 +104,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/family/overview") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -102,7 +115,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/positions") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -113,7 +126,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/decisions") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -124,7 +137,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/proposals") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -135,7 +148,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/runtime") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -146,7 +159,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/strategies") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -157,7 +170,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/portal/strategies") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -168,7 +181,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/portal/roster") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -179,7 +192,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/portal/roster") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -190,7 +203,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/portal/runtime/start") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -201,7 +214,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/portal/runtime/stop") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -216,7 +229,7 @@ export async function handleRequest(
   const rosterRoute = parseRosterRoute(url.pathname);
 
   if (request.method === "POST" && proposalRoute && proposalRoute.action === "review") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -227,7 +240,7 @@ export async function handleRequest(
   }
 
   if (request.method === "PATCH" && rosterRoute) {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -238,7 +251,7 @@ export async function handleRequest(
   }
 
   if (request.method === "DELETE" && rosterRoute) {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -249,7 +262,7 @@ export async function handleRequest(
   }
 
   if (request.method === "GET" && strategyRoute && strategyRoute.action === "chat") {
-    const user = await requireRole(request, response, options.identityProvider, familyBoundaryRoles);
+    const user = await requireRole(request, response, options, familyBoundaryRoles);
 
     if (!user) {
       return;
@@ -260,7 +273,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && strategyRoute && strategyRoute.action === "chat") {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -271,7 +284,7 @@ export async function handleRequest(
   }
 
   if (request.method === "PATCH" && strategyRoute && strategyRoute.action === null) {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -282,7 +295,7 @@ export async function handleRequest(
   }
 
   if (request.method === "POST" && strategyRoute && strategyRoute.action !== null) {
-    const user = await requireRole(request, response, options.identityProvider, adminBoundaryRoles);
+    const user = await requireRole(request, response, options, adminBoundaryRoles);
 
     if (!user) {
       return;
@@ -1083,9 +1096,36 @@ function isNotFoundError(error: unknown): boolean {
 async function requireRole(
   request: IncomingMessage,
   response: ServerResponse,
-  identityProvider: IdentityProvider | undefined,
+  options: ServerOptions,
   allowedRoles: readonly Role[]
 ): Promise<AuthenticatedUser | null> {
+  const trustedProxyAuth = options.trustedProxyAuth;
+
+  if (trustedProxyAuth) {
+    // Reverse-proxy identity mode. The header is trustworthy only because the
+    // OIDC proxy (same netns) is the sole path to this listener and rewrites
+    // X-Forwarded-* on every proxied request; anything else in the namespace
+    // is a trusted stack member with DB credentials anyway. NEVER fall
+    // through to the Bearer path in this mode — the browser client sends a
+    // sentinel token that must stay meaningless.
+    const raw = request.headers[trustedProxyAuth.headerName];
+    const value = typeof raw === "string" ? raw.trim() : "";
+
+    if (value === "" || value.toLowerCase() !== trustedProxyAuth.expectedIdentity.toLowerCase()) {
+      writeJson(response, 401, { error: "invalid_session" });
+      return null;
+    }
+
+    if (!canAccessRole(trustedProxyAuth.user, allowedRoles)) {
+      writeJson(response, 403, { error: "forbidden" });
+      return null;
+    }
+
+    return trustedProxyAuth.user;
+  }
+
+  const identityProvider = options.identityProvider;
+
   if (!identityProvider) {
     writeJson(response, 503, { error: "identity_unavailable" });
     return null;

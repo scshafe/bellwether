@@ -1,7 +1,8 @@
+import { useEffect } from "react";
 import type { FormEvent, ReactElement, ReactNode } from "react";
 
 import { quantPlaybookParameterKeys, type QuantPlaybookParameterKey, type QuantPlaybookParameters } from "./quantPlaybookParameters";
-import { createSession, setPassword, setUsername, signOut } from "./store/authSlice";
+import { bootstrapSession, createSession, setPassword, setUsername, signOut, TRUSTED_PROXY_TOKEN } from "./store/authSlice";
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, strategyPerformanceSelectors, type PortalAccount, type PortalPosition, type PortalStrategyPerformanceSummary } from "./store/positionsSlice";
@@ -67,19 +68,27 @@ export function App(): ReactElement {
   const canManageProposals = canManageRuntime;
   const visibleTabs = canManageRuntime ? tabs : tabs.filter((tab) => tab.id !== "control");
 
+  const loadPortalData = () => {
+    void dispatch(fetchPortalPositions());
+    void dispatch(fetchPortalDecisions());
+    void dispatch(fetchPortalProposals());
+    void dispatch(fetchRoster());
+    void dispatch(fetchRuntimeStatus());
+    void dispatch(fetchPortalStrategies());
+  };
+
   const submitSession = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    void dispatch(createSession())
-      .unwrap()
-      .then(() => {
-        void dispatch(fetchPortalPositions());
-        void dispatch(fetchPortalDecisions());
-        void dispatch(fetchPortalProposals());
-        void dispatch(fetchRoster());
-        void dispatch(fetchRuntimeStatus());
-        void dispatch(fetchPortalStrategies());
-      });
+    void dispatch(createSession()).unwrap().then(loadPortalData);
   };
+
+  // Ambient-session probe: behind the OIDC proxy this succeeds immediately
+  // and the login panel never renders; in password mode it 401s and the app
+  // behaves exactly as before. Mount-once by design.
+  useEffect(() => {
+    void dispatch(bootstrapSession()).unwrap().then(loadPortalData).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <main className="app-shell">
@@ -105,9 +114,11 @@ export function App(): ReactElement {
               <span className="label">Session</span>
               <strong>{auth.user.displayName}</strong>
               <code>{auth.user.role}</code>
-              <button type="button" className="ghost" onClick={() => dispatch(signOut())}>
-                Sign out
-              </button>
+              {auth.token === TRUSTED_PROXY_TOKEN ? null : (
+                <button type="button" className="ghost" onClick={() => dispatch(signOut())}>
+                  Sign out
+                </button>
+              )}
             </>
           ) : (
             <span className="muted">Authenticate to read portal data.</span>

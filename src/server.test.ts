@@ -418,6 +418,80 @@ describe("identity API boundary", () => {
   });
 });
 
+describe("trusted proxy identity boundary", () => {
+  let server: Server;
+  let baseUrl = "";
+
+  before(async () => {
+    const started = await startTestServer({
+      // The identity provider is deliberately wired too — these tests prove
+      // the Bearer path is DEAD in proxy mode, not merely unconfigured.
+      identityProvider: testIdentityProvider(),
+      trustedProxyAuth: {
+        headerName: "x-forwarded-email",
+        expectedIdentity: "cole@example.com",
+        user: { id: "portal-admin", username: "cole", displayName: "Cole", role: "admin" }
+      }
+    });
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("authenticates the proxied identity header as the admin portal user", async () => {
+    const response = await fetch(`${baseUrl}/admin/roles`, {
+      headers: { "x-forwarded-email": "cole@example.com" }
+    });
+    const body = (await response.json()) as { user?: { id?: string; role?: string } };
+
+    assert.equal(response.status, 200);
+    assert.equal(body.user?.id, "portal-admin");
+    assert.equal(body.user?.role, "admin");
+
+    const family = await fetch(`${baseUrl}/family/overview`, {
+      headers: { "x-forwarded-email": "Cole@Example.COM" }
+    });
+
+    assert.equal(family.status, 200, "identity comparison is case-insensitive");
+  });
+
+  it("fails closed on a missing or forged identity header", async () => {
+    const missing = await fetch(`${baseUrl}/admin/roles`);
+
+    assert.equal(missing.status, 401);
+    assert.deepEqual(await missing.json(), { error: "invalid_session" });
+
+    const forged = await fetch(`${baseUrl}/admin/roles`, {
+      headers: { "x-forwarded-email": "intruder@example.com" }
+    });
+
+    assert.equal(forged.status, 401);
+  });
+
+  it("ignores Bearer tokens entirely in proxy mode", async () => {
+    // A token in the provider's deterministic format, with no proxy header:
+    // in proxy mode requireRole must never consult the Bearer path.
+    const response = await fetch(`${baseUrl}/admin/roles`, {
+      headers: { authorization: "Bearer in-memory-session:user-cole" }
+    });
+
+    assert.equal(response.status, 401);
+  });
+
+  it("makes the password login route structurally unreachable", async () => {
+    const response = await fetch(`${baseUrl}/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "cole", password: "not-a-real-password" })
+    });
+
+    assert.equal(response.status, 404);
+  });
+});
+
 describe("viewer portal role audit", () => {
   let server: Server;
   let baseUrl = "";

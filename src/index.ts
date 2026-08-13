@@ -6,7 +6,7 @@ import { createBrokerAdapter, ensureBrokerFlipLogSchema, paperFlipState } from "
 import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./agent-team.js";
 import { createPool } from "./db.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
-import { createIdentityProvider } from "./portal-identity.js";
+import { createIdentityProvider, readTrustedProxyAuthConfig } from "./portal-identity.js";
 import { ensureQualitativeItemsSchema, ensureSourcesSchema, PostgresSourcesStore } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
@@ -33,6 +33,7 @@ const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await creat
 const server = createServer({
   databaseUrl,
   identityProvider: createIdentityProvider(process.env),
+  trustedProxyAuth: readTrustedProxyAuthConfig(process.env) ?? undefined,
   broker: await createBrokerAdapter(brokerCredentialVault, ALPACA_PAPER_BROKER_ACCOUNT_ID, paperFlipState()),
   decisionLogStore: new PostgresAgentDecisionLogStore(pool),
   runtimeControl: new PostgresAgentRuntimeControl(pool),

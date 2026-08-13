@@ -1,4 +1,10 @@
-import { adminBoundaryRoles, InMemoryIdentityProvider, type InMemoryIdentityRecord, type Role } from "./identity.js";
+import {
+  adminBoundaryRoles,
+  InMemoryIdentityProvider,
+  type InMemoryIdentityRecord,
+  type Role,
+  type TrustedProxyAuthConfig
+} from "./identity.js";
 
 type PortalUserDefaults = {
   id: string;
@@ -48,6 +54,42 @@ export function createIdentityProvider(config: NodeJS.ProcessEnv): InMemoryIdent
   }
 
   return new InMemoryIdentityProvider(users);
+}
+
+/** PORTAL_TRUSTED_PROXY_AUTH=1|true enables reverse-proxy identity mode.
+ *  Fail-closed: enabling it without PORTAL_TRUSTED_PROXY_IDENTITY (the Pocket
+ *  ID email oauth2-proxy will forward) refuses to boot — the alternative is a
+ *  server that trusts an unvalidated header. The authenticated identity maps
+ *  to the seeded admin portal user (same PORTAL_ADMIN_* envs, password inert). */
+export function readTrustedProxyAuthConfig(config: NodeJS.ProcessEnv): TrustedProxyAuthConfig | null {
+  const raw = config.PORTAL_TRUSTED_PROXY_AUTH?.trim().toLowerCase() ?? "";
+
+  if (raw !== "1" && raw !== "true") {
+    return null;
+  }
+
+  const expectedIdentity = config.PORTAL_TRUSTED_PROXY_IDENTITY?.trim() ?? "";
+
+  if (expectedIdentity === "") {
+    throw new Error(
+      "PORTAL_TRUSTED_PROXY_AUTH is enabled but PORTAL_TRUSTED_PROXY_IDENTITY is unset — refusing to trust an unvalidated header"
+    );
+  }
+
+  const headerName = (config.PORTAL_TRUSTED_PROXY_HEADER?.trim() || "x-forwarded-email").toLowerCase();
+  const admin = configuredUser(config, "PORTAL_ADMIN", {
+    id: "portal-admin",
+    username: "admin",
+    displayName: "Administrator",
+    role: "admin",
+    password: "change-me"
+  });
+
+  return {
+    headerName,
+    expectedIdentity,
+    user: { id: admin.id, username: admin.username, displayName: admin.displayName, role: admin.role }
+  };
 }
 
 function optionalConfiguredUser(

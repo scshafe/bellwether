@@ -48,6 +48,29 @@ export const createSession = createAsyncThunk<SessionResponse, void, { state: { 
   }
 );
 
+/** Sentinel token for reverse-proxy identity mode: the server ignores Bearer
+ *  tokens entirely in that mode, so this value only satisfies client-side
+ *  "has a session" gates; it never authenticates anything. */
+export const TRUSTED_PROXY_TOKEN = "trusted-proxy";
+
+/** Ambient-session probe. Behind the OIDC proxy the request arrives already
+ *  authenticated and this resolves with the mapped portal user — the login
+ *  screen never renders. In password mode it 401s and nothing changes. */
+export const bootstrapSession = createAsyncThunk<SessionResponse, void, { rejectValue: string }>(
+  "auth/bootstrapSession",
+  async (_arg, { rejectWithValue }) => {
+    const response = await fetch("/family/overview");
+
+    if (!response.ok) {
+      return rejectWithValue(`no ambient session: ${response.status}`);
+    }
+
+    const body = (await response.json()) as { ok: boolean; user: AuthenticatedUser };
+
+    return { token: TRUSTED_PROXY_TOKEN, user: body.user };
+  }
+);
+
 const authSlice = createSlice({
   name: "auth",
   initialState,
@@ -82,6 +105,14 @@ const authSlice = createSlice({
         state.token = null;
         state.user = null;
         state.error = action.payload ?? action.error.message ?? "session failed";
+      })
+      // No pending/rejected cases on purpose: a failed probe must leave the
+      // password login flow byte-identical to today.
+      .addCase(bootstrapSession.fulfilled, (state, action) => {
+        state.status = "succeeded";
+        state.token = action.payload.token;
+        state.user = action.payload.user;
+        state.password = "";
       });
   }
 });

@@ -27,6 +27,21 @@ export interface IdentityProvider {
   identifySession(token: string): Promise<AuthenticatedUser | null>;
 }
 
+/** Reverse-proxy identity mode: an OIDC-authenticating proxy (oauth2-proxy in
+ *  front of the portal, same network namespace) is the only path to the
+ *  listener and stamps the authenticated identity into a request header. When
+ *  configured, the server trusts THAT header — matched against the one
+ *  expected identity — and maps it to the seeded admin portal user; the
+ *  password login route goes dark and Bearer tokens are ignored entirely. */
+export type TrustedProxyAuthConfig = {
+  /** Lower-cased header name carrying the identity (default x-forwarded-email). */
+  headerName: string;
+  /** The exact identity (Pocket ID email) the header must equal, case-insensitive. */
+  expectedIdentity: string;
+  /** The portal user every authenticated request acts as (the seeded admin). */
+  user: AuthenticatedUser;
+};
+
 export type InMemoryIdentityRecord = AuthenticatedUser & {
   password: string;
 };
