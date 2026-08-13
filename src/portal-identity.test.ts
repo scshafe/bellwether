@@ -26,13 +26,34 @@ describe("trusted proxy auth config", () => {
     });
 
     assert.equal(config?.headerName, "x-forwarded-email");
-    assert.equal(config?.expectedIdentity, "cole@example.com");
+    assert.deepEqual(config?.expectedIdentities, ["cole@example.com"]);
+    assert.equal(config?.allowAnyIdentity, false);
     assert.deepEqual(config?.user, {
       id: "portal-admin",
       username: "cole",
       displayName: "Cole (admin)",
       role: "admin"
     });
+  });
+
+  it("parses a comma-separated allowlist — several humans, one shared account", () => {
+    const config = readTrustedProxyAuthConfig({
+      PORTAL_TRUSTED_PROXY_AUTH: "1",
+      PORTAL_TRUSTED_PROXY_IDENTITY: "Cole@Example.com, family@example.com,, cole@example.com "
+    });
+
+    assert.deepEqual(config?.expectedIdentities, ["cole@example.com", "family@example.com"]);
+    assert.equal(config?.allowAnyIdentity, false);
+  });
+
+  it("treats '*' as delegate-authz-to-the-IdP (explicit opt-in)", () => {
+    const config = readTrustedProxyAuthConfig({
+      PORTAL_TRUSTED_PROXY_AUTH: "1",
+      PORTAL_TRUSTED_PROXY_IDENTITY: "*"
+    });
+
+    assert.equal(config?.allowAnyIdentity, true);
+    assert.deepEqual(config?.expectedIdentities, []);
   });
 
   it("honors a custom header name, lower-cased", () => {

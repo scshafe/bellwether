@@ -1109,9 +1109,11 @@ async function requireRole(
     // through to the Bearer path in this mode — the browser client sends a
     // sentinel token that must stay meaningless.
     const raw = request.headers[trustedProxyAuth.headerName];
-    const value = typeof raw === "string" ? raw.trim() : "";
+    const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+    const identityAccepted =
+      value !== "" && (trustedProxyAuth.allowAnyIdentity || trustedProxyAuth.expectedIdentities.includes(value));
 
-    if (value === "" || value.toLowerCase() !== trustedProxyAuth.expectedIdentity.toLowerCase()) {
+    if (!identityAccepted) {
       writeJson(response, 401, { error: "invalid_session" });
       return null;
     }

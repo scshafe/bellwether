@@ -36,8 +36,13 @@ export interface IdentityProvider {
 export type TrustedProxyAuthConfig = {
   /** Lower-cased header name carrying the identity (default x-forwarded-email). */
   headerName: string;
-  /** The exact identity (Pocket ID email) the header must equal, case-insensitive. */
-  expectedIdentity: string;
+  /** Lower-cased identities (Pocket ID emails) allowed to act as the shared
+   *  account. Multiple people, ONE portal user — the shared-account model. */
+  expectedIdentities: readonly string[];
+  /** True when the operator configured "*": ANY identity the proxy forwards is
+   *  accepted — authorization is fully delegated to the IdP's per-client
+   *  allowed-groups gate. An explicit opt-in, never a default. */
+  allowAnyIdentity: boolean;
   /** The portal user every authenticated request acts as (the seeded admin). */
   user: AuthenticatedUser;
 };

@@ -429,7 +429,8 @@ describe("trusted proxy identity boundary", () => {
       identityProvider: testIdentityProvider(),
       trustedProxyAuth: {
         headerName: "x-forwarded-email",
-        expectedIdentity: "cole@example.com",
+        expectedIdentities: ["cole@example.com", "family@example.com"],
+        allowAnyIdentity: false,
         user: { id: "portal-admin", username: "cole", displayName: "Cole", role: "admin" }
       }
     });
@@ -456,6 +457,16 @@ describe("trusted proxy identity boundary", () => {
     });
 
     assert.equal(family.status, 200, "identity comparison is case-insensitive");
+  });
+
+  it("accepts every allowlisted identity as the same shared account", async () => {
+    const response = await fetch(`${baseUrl}/admin/roles`, {
+      headers: { "x-forwarded-email": "family@example.com" }
+    });
+    const body = (await response.json()) as { user?: { id?: string } };
+
+    assert.equal(response.status, 200);
+    assert.equal(body.user?.id, "portal-admin", "second identity maps to the SAME shared portal user");
   });
 
   it("fails closed on a missing or forged identity header", async () => {

@@ -68,14 +68,26 @@ export function readTrustedProxyAuthConfig(config: NodeJS.ProcessEnv): TrustedPr
     return null;
   }
 
-  const expectedIdentity = config.PORTAL_TRUSTED_PROXY_IDENTITY?.trim() ?? "";
+  // Comma-separated identity allowlist — several humans, one shared portal
+  // account. A literal "*" delegates the who-may-enter question entirely to
+  // the IdP's per-client allowed-groups gate (explicit opt-in).
+  const rawIdentities = config.PORTAL_TRUSTED_PROXY_IDENTITY?.trim() ?? "";
+  const expectedIdentities = [
+    ...new Set(
+      rawIdentities
+        .split(",")
+        .map((entry) => entry.trim().toLowerCase())
+        .filter((entry) => entry !== "")
+    )
+  ];
 
-  if (expectedIdentity === "") {
+  if (expectedIdentities.length === 0) {
     throw new Error(
       "PORTAL_TRUSTED_PROXY_AUTH is enabled but PORTAL_TRUSTED_PROXY_IDENTITY is unset — refusing to trust an unvalidated header"
     );
   }
 
+  const allowAnyIdentity = expectedIdentities.includes("*");
   const headerName = (config.PORTAL_TRUSTED_PROXY_HEADER?.trim() || "x-forwarded-email").toLowerCase();
   const admin = configuredUser(config, "PORTAL_ADMIN", {
     id: "portal-admin",
@@ -87,7 +99,8 @@ export function readTrustedProxyAuthConfig(config: NodeJS.ProcessEnv): TrustedPr
 
   return {
     headerName,
-    expectedIdentity,
+    expectedIdentities: allowAnyIdentity ? [] : expectedIdentities,
+    allowAnyIdentity,
     user: { id: admin.id, username: admin.username, displayName: admin.displayName, role: admin.role }
   };
 }
