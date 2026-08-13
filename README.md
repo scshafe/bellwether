@@ -30,3 +30,5 @@ portal API reads the Alpaca paper account data and existing strategy labels, the
 positions Redux slice stores the normalized summary, and the portal renders it
 from state with a manual refresh. This remains PAPER-only design work; it adds no
 real-money path, broker write, deployment step, or app code in this turn.
+
+<!-- autodeploy round-trip proof 2026-08-13 -->
