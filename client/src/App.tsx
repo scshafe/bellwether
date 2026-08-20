@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import type { FormEvent, ReactElement, ReactNode } from "react";
 
 import { quantPlaybookParameterKeys, type QuantPlaybookParameterKey, type QuantPlaybookParameters } from "./quantPlaybookParameters";
-import { bootstrapSession, createSession, setPassword, setUsername, signOut, TRUSTED_PROXY_TOKEN } from "./store/authSlice";
+import { bootstrapSession, createSession, proxySignOutUrl, setPassword, setUsername, signOut, TRUSTED_PROXY_TOKEN } from "./store/authSlice";
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, strategyPerformanceSelectors, type PortalAccount, type PortalPosition, type PortalStrategyPerformanceSummary } from "./store/positionsSlice";
@@ -114,11 +114,19 @@ export function App(): ReactElement {
               <span className="label">Session</span>
               <strong>{auth.user.displayName}</strong>
               <code>{auth.user.role}</code>
-              {auth.token === TRUSTED_PROXY_TOKEN ? null : (
-                <button type="button" className="ghost" onClick={() => dispatch(signOut())}>
-                  Sign out
-                </button>
-              )}
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  if (auth.token === TRUSTED_PROXY_TOKEN) {
+                    window.location.assign(proxySignOutUrl());
+                  } else {
+                    dispatch(signOut());
+                  }
+                }}
+              >
+                Sign out
+              </button>
             </>
           ) : (
             <span className="muted">Authenticate to read portal data.</span>

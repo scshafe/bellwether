@@ -53,6 +53,21 @@ export const createSession = createAsyncThunk<SessionResponse, void, { state: { 
  *  "has a session" gates; it never authenticates anything. */
 export const TRUSTED_PROXY_TOKEN = "trusted-proxy";
 
+/** RP-initiated logout URL for proxy mode (infra POCKETID-STACK-PATTERN.md
+ *  §Sign-out). oauth2-proxy clears its own cookie, substitutes the session's
+ *  {id_token} into the redirect, and hands the browser to Pocket ID's
+ *  end-session endpoint — ending the IdP session too — which bounces back to
+ *  the app root, where the door presents the passkey prompt (the logged-out
+ *  state on an always-gated app). A plain /oauth2/sign_out clears only the
+ *  proxy cookie and the still-live IdP session re-authenticates instantly.
+ *  The IdP is `id.` on the app's own tailnet suffix, by house convention. */
+export function proxySignOutUrl(): string {
+  const suffix = window.location.hostname.split(".").slice(1).join(".");
+  const postLogout = encodeURIComponent(`${window.location.origin}/`);
+  const endSession = `https://id.${suffix}/api/oidc/end-session?id_token_hint={id_token}&post_logout_redirect_uri=${postLogout}`;
+  return `/oauth2/sign_out?rd=${encodeURIComponent(endSession)}`;
+}
+
 /** Ambient-session probe. Behind the OIDC proxy the request arrives already
  *  authenticated and this resolves with the mapped portal user — the login
  *  screen never renders. In password mode it 401s and nothing changes. */
