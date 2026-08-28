@@ -1,3 +1,10 @@
+# SUPERSEDED — reference only. The live deployment is infra's
+# stacks/bellwether (compose.yaml + .env on the runtime host), which serves
+# https://bellwether.colobus-stargazer.ts.net through an oauth2-proxy door in
+# the sidecar's netns. This file describes the torn-down Docker-Desktop deploy
+# it was ported from; it has no door of its own, so an app brought up from
+# here answers 401 to everything (see AUTH.md — Pocket ID is the only way in).
+#
 # Bellwether — self-contained tailnet deployment (Mac / Docker Desktop).
 #
 # Brings up the portal server + worker + its own Postgres on a private network.
@@ -56,10 +63,14 @@ services:
       # P6c runs the Strategy/Analyst chat agent in the server request path, so the
       # server now needs the OpenAI-OAuth credential (same file the worker mounts).
       LLM_OAUTH_CREDENTIAL_FILE: /run/secrets/openai-oauth.json
-      PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
-      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?set PORTAL_ADMIN_PASSWORD in .env}
-      PORTAL_ADMIN_DISPLAY_NAME: "Cole (admin)"
-      PORTAL_ADMIN_ROLE: admin
+      # Identity: Pocket ID only, verified by signature against the issuer's
+      # JWKS. The app has no password and trusts no header, so it needs an
+      # OIDC proxy in front that forwards the id token
+      # (--pass-authorization-header). Roles live in the portal_users table,
+      # not here. Any retired PORTAL_ADMIN_*/PORTAL_TRUSTED_PROXY_*/
+      # PORTAL_ROLE_* left set refuses the boot.
+      PORTAL_OIDC_ISSUER: ${POCKETID_ISSUER:?set POCKETID_ISSUER in .env}
+      PORTAL_OIDC_AUDIENCE: ${POCKETID_CLIENT_ID:?set POCKETID_CLIENT_ID in .env}
     volumes:
       - ${BELLWETHER_AGENT_RESOURCES}/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
       - ${BELLWETHER_AGENT_RESOURCES}/openai-oauth.json:/run/secrets/openai-oauth.json:ro

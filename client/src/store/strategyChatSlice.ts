@@ -52,15 +52,13 @@ export const fetchStrategyChatThread = createAsyncThunk<
   string,
   { state: RootState; rejectValue: string }
 >("strategyChat/fetchStrategyChatThread", async (strategyId, { getState, rejectWithValue }) => {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
-  const response = await fetch(`/portal/strategies/${encodeURIComponent(strategyId)}/chat`, {
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch(`/portal/strategies/${encodeURIComponent(strategyId)}/chat`);
 
   if (!response.ok) {
     return rejectWithValue(`strategy chat rejected: ${response.status}`);
@@ -75,18 +73,15 @@ export const postStrategyChatMessage = createAsyncThunk<
   { strategyId: string; content: string; mode: StrategyChatMode },
   { state: RootState; rejectValue: string }
 >("strategyChat/postStrategyChatMessage", async ({ strategyId, content, mode }, { getState, rejectWithValue }) => {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
   const response = await fetch(`/portal/strategies/${encodeURIComponent(strategyId)}/chat`, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json"
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ content, mode })
   });
 

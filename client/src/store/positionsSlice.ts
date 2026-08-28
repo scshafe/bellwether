@@ -68,15 +68,13 @@ export const fetchPortalPositions = createAsyncThunk<
   void,
   { state: RootState; rejectValue: string }
 >("positions/fetchPortalPositions", async (_arg, { getState, rejectWithValue }) => {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
-  const response = await fetch("/portal/positions", {
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch("/portal/positions");
 
   if (!response.ok) {
     return rejectWithValue(`positions rejected: ${response.status}`);

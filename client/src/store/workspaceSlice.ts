@@ -1,6 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
-export type WorkspaceTab = "positions" | "decisions" | "control" | "strategies" | "roster" | "proposals";
+export type WorkspaceTab = "positions" | "decisions" | "control" | "strategies" | "roster" | "proposals" | "users";
 
 type WorkspaceState = {
   activeTab: WorkspaceTab;

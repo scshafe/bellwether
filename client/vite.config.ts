@@ -10,8 +10,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/auth": "http://127.0.0.1:3000",
-      "/portal": "http://127.0.0.1:3000"
+      "/portal": "http://127.0.0.1:3000",
+      "/family": "http://127.0.0.1:3000",
+      "/admin": "http://127.0.0.1:3000"
     }
   }
 });

@@ -100,16 +100,13 @@ async function requestRuntime(
   getState: () => RootState,
   rejectWithValue: (value: string) => unknown
 ): Promise<RuntimeStateSnapshot> {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session") as RuntimeStateSnapshot;
   }
 
-  const response = await fetch(path, {
-    method,
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch(path, { method });
 
   if (!response.ok) {
     return rejectWithValue(`runtime rejected: ${response.status}`) as RuntimeStateSnapshot;

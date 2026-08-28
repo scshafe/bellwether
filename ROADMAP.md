@@ -95,10 +95,11 @@ sand or retrofit plumbing. Unblocks everything.
   in-repo dependency later (R5) instead of a foreign sidecar. Consequence accepted:
   mission-swarm (engines `>=22.22 <23`) cannot join these processes — it stays
   deferred (see "Deferred and declined").
-- **Per-user identity in trusted-proxy mode.** Today every proxied request acts as
-  the single shared admin. Map proxy identities to real portal users with individual
-  roles; password mode demotes to a dev-only fallback. Role checks stop being one
-  collapsed boolean.
+- **Per-user identity from Pocket ID.** ~~Today every proxied request acts as the
+  single shared admin.~~ *Landed 2026-08-27 ahead of R0 (see AUTH.md): the in-app
+  credential system is deleted, the forwarded id token is signature-verified
+  against Pocket ID's JWKS, and verified emails map to individual roles. Role
+  checks are no longer one collapsed boolean.*
 - **The LLM ledger.** One shared wrapper around `ReasoningModel` that records a
   usage-receipt row (model, tokens, cost estimate, caller, cycle/thread id) for
   *every* call — cycle agents, chat, brief, proposals. This is pillar 6 landing
@@ -112,14 +113,14 @@ sand or retrofit plumbing. Unblocks everything.
   integration fixture with a fake broker and scripted model, and keep the
   store-conformance style the server tests already use.
 
-**Cutover:** runtime upgrade and auth swap in one downtime window. Existing password
-sessions die; nobody will miss them.
+**Cutover:** runtime upgrade in one downtime window. The auth swap already
+happened (2026-08-27); password sessions are gone and nobody missed them.
 
 **Exit criteria**
 
 - Platform boots and all tests pass on Node 24; CI pins it.
-- Two different proxied users land as two different portal identities with distinct
-  roles.
+- ~~Two different proxied users land as two different portal identities with
+  distinct roles.~~ *Done 2026-08-27.*
 - Every existing LLM call site routes through the ledger; a receipts table shows
   rows per cycle.
 

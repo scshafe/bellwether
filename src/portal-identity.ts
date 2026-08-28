@@ -1,146 +1,234 @@
-import {
-  adminBoundaryRoles,
-  InMemoryIdentityProvider,
-  type InMemoryIdentityRecord,
-  type Role,
-  type TrustedProxyAuthConfig
-} from "./identity.js";
+import type { IncomingHttpHeaders } from "node:http";
 
-type PortalUserDefaults = {
-  id: string;
-  username: string;
-  displayName: string;
-  role: Role;
-  password: string;
+import type { IdentityResolution, IdentityResolver } from "./identity.js";
+import {
+  JwksKeyStore,
+  SigningKeyUnavailableError,
+  verifyIdToken,
+  type JwtClaims,
+  type SigningKeySource
+} from "./oidc.js";
+import { isActivePortalUser, type PortalUserIdentity, type PortalUsersStore } from "./portal-users.js";
+
+/** How the portal learns who is knocking.
+ *
+ *  Pocket ID is the only human credential. oauth2-proxy terminates the OIDC
+ *  flow and forwards the id token; the portal verifies that token's signature
+ *  against Pocket ID's JWKS before believing a word of it. Nothing here trusts
+ *  a bare header — a header is forgeable by anything that reaches the app port
+ *  directly, which is precisely the case this design refuses to lose.
+ *
+ *  What the holder may DO is not decided here at all: the verified subject is
+ *  looked up in `portal_users`, this app's own account table. Authentication
+ *  is Pocket ID's; authorization is the portal's, and it lives in the database
+ *  where an admin can change it — not in an env var that needs a redeploy. */
+export type PortalIdentityConfig = {
+  issuer: string;
+  audiences: readonly string[];
+  jwksUri: string | null;
+  /** Header carrying the id token; `authorization` accepts a Bearer prefix. */
+  tokenHeader: string;
 };
 
-export function createIdentityProvider(config: NodeJS.ProcessEnv): InMemoryIdentityProvider {
-  const users = [
-    configuredUser(config, "PORTAL_ADMIN", {
-      id: "portal-admin",
-      username: "admin",
-      displayName: "Administrator",
-      role: "admin",
-      password: "change-me"
-    })
-  ];
+const passwordRetired = "The portal has no password login.";
+const headerRetired = "The portal trusts no identity header — only a signed Pocket ID token.";
+const rosterRetired = "Roles live in the portal_users table, granted by an admin in the portal.";
 
-  const managerUser = optionalConfiguredUser(config, "PORTAL_MANAGER", {
-    id: "portal-manager",
-    username: "manager",
-    displayName: "Manager",
-    role: "manager",
-    password: "change-me"
-  });
+/** Env vars from the deleted in-app credential system, and from the email
+ *  roster that briefly replaced it. Their presence means an operator still
+ *  believes a password, a header, or a list of people does something here, so
+ *  the portal refuses to boot rather than run beside that belief. */
+const retiredIdentityEnvVars: Readonly<Record<string, string>> = {
+  PORTAL_ADMIN_ID: passwordRetired,
+  PORTAL_ADMIN_USERNAME: passwordRetired,
+  PORTAL_ADMIN_PASSWORD: passwordRetired,
+  PORTAL_ADMIN_DISPLAY_NAME: passwordRetired,
+  PORTAL_ADMIN_ROLE: passwordRetired,
+  PORTAL_MANAGER_ID: passwordRetired,
+  PORTAL_MANAGER_USERNAME: passwordRetired,
+  PORTAL_MANAGER_PASSWORD: passwordRetired,
+  PORTAL_MANAGER_DISPLAY_NAME: passwordRetired,
+  PORTAL_MANAGER_ROLE: passwordRetired,
+  PORTAL_VIEWER_ID: passwordRetired,
+  PORTAL_VIEWER_USERNAME: passwordRetired,
+  PORTAL_VIEWER_PASSWORD: passwordRetired,
+  PORTAL_VIEWER_DISPLAY_NAME: passwordRetired,
+  PORTAL_VIEWER_ROLE: passwordRetired,
+  PORTAL_TRUSTED_PROXY_AUTH: headerRetired,
+  PORTAL_TRUSTED_PROXY_IDENTITY: headerRetired,
+  PORTAL_TRUSTED_PROXY_HEADER: headerRetired,
+  PORTAL_ROLE_ADMINS: rosterRetired,
+  PORTAL_ROLE_MANAGERS: rosterRetired,
+  PORTAL_ROLE_VIEWERS: rosterRetired,
+  PORTAL_ROLE_ADMINS_GROUP: rosterRetired,
+  PORTAL_ROLE_MANAGERS_GROUP: rosterRetired,
+  PORTAL_ROLE_VIEWERS_GROUP: rosterRetired
+};
 
-  if (managerUser) {
-    users.push(managerUser);
+export function readPortalIdentityConfig(config: NodeJS.ProcessEnv): PortalIdentityConfig {
+  assertNoRetiredIdentityConfig(config);
+
+  const issuer = requiredValue(config, "PORTAL_OIDC_ISSUER").replace(/\/+$/u, "");
+
+  if (!issuer.startsWith("https://")) {
+    throw new Error("PORTAL_OIDC_ISSUER must be an https URL");
   }
 
-  const viewerUser = optionalConfiguredUser(config, "PORTAL_VIEWER", {
-    id: "portal-viewer",
-    username: "viewer",
-    displayName: "Family Viewer",
-    role: "viewer",
-    password: "change-me"
-  });
+  const audiences = splitList(config.PORTAL_OIDC_AUDIENCE, { lowerCase: false });
 
-  if (viewerUser) {
-    users.push(viewerUser);
+  if (audiences.length === 0) {
+    throw new Error("PORTAL_OIDC_AUDIENCE is required — the OIDC client id tokens must be minted for");
   }
 
-  if (!users.some((user) => adminBoundaryRoles.includes(user.role))) {
-    throw new Error("portal identity configuration must seed at least one admin-or-manager user");
-  }
-
-  return new InMemoryIdentityProvider(users);
+  return {
+    issuer,
+    audiences,
+    jwksUri: config.PORTAL_OIDC_JWKS_URL?.trim() || null,
+    tokenHeader: (config.PORTAL_OIDC_TOKEN_HEADER?.trim() || "authorization").toLowerCase()
+  };
 }
 
-/** PORTAL_TRUSTED_PROXY_AUTH=1|true enables reverse-proxy identity mode.
- *  Fail-closed: enabling it without PORTAL_TRUSTED_PROXY_IDENTITY (the Pocket
- *  ID email oauth2-proxy will forward) refuses to boot — the alternative is a
- *  server that trusts an unvalidated header. The authenticated identity maps
- *  to the seeded admin portal user (same PORTAL_ADMIN_* envs, password inert). */
-export function readTrustedProxyAuthConfig(config: NodeJS.ProcessEnv): TrustedProxyAuthConfig | null {
-  const raw = config.PORTAL_TRUSTED_PROXY_AUTH?.trim().toLowerCase() ?? "";
+export type PortalIdentityResolverDeps = {
+  keys?: SigningKeySource;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+};
 
-  if (raw !== "1" && raw !== "true") {
+export function createPortalIdentityResolver(
+  config: PortalIdentityConfig,
+  users: PortalUsersStore,
+  deps: PortalIdentityResolverDeps = {}
+): IdentityResolver {
+  const keys =
+    deps.keys ??
+    new JwksKeyStore({
+      issuer: config.issuer,
+      jwksUri: config.jwksUri,
+      ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.now ? { now: deps.now } : {})
+    });
+
+  return async (headers: IncomingHttpHeaders): Promise<IdentityResolution> => {
+    const token = readForwardedToken(headers, config.tokenHeader);
+
+    if (!token) {
+      return { status: "anonymous", reason: "missing_token" };
+    }
+
+    let claims: JwtClaims;
+
+    try {
+      claims = await verifyIdToken(token, {
+        issuer: config.issuer,
+        audiences: config.audiences,
+        keys,
+        ...(deps.now ? { now: deps.now } : {})
+      });
+    } catch (error) {
+      if (error instanceof SigningKeyUnavailableError) {
+        return { status: "unavailable", detail: error.message };
+      }
+
+      return { status: "anonymous", reason: "invalid_token", detail: errorDetail(error) };
+    }
+
+    // The token said who; the account table says what. Knocking enrols the
+    // subject as `pending` so an admin can see and grant them — nobody has to
+    // transcribe an opaque subject to add a person.
+    const account = await users.recordSignIn(readSignInIdentity(claims));
+
+    if (!isActivePortalUser(account)) {
+      return { status: "unprovisioned", identity: describe(account), accountStatus: account.status };
+    }
+
+    return {
+      status: "authenticated",
+      user: {
+        id: account.id,
+        username: account.email ?? account.subject,
+        displayName: account.displayName ?? account.email ?? account.subject,
+        role: account.role
+      }
+    };
+  };
+}
+
+/** oauth2-proxy forwards the id token as `Authorization: Bearer <jwt>` when
+ *  configured with pass_authorization_header; a deployment that forwards it in
+ *  some other header names that header instead. Either way the bytes are only
+ *  believed after the signature check. */
+function readForwardedToken(headers: IncomingHttpHeaders, headerName: string): string | null {
+  const raw = headers[headerName];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim() ?? "";
+
+  if (value === "") {
     return null;
   }
 
-  // Comma-separated identity allowlist — several humans, one shared portal
-  // account. A literal "*" delegates the who-may-enter question entirely to
-  // the IdP's per-client allowed-groups gate (explicit opt-in).
-  const rawIdentities = config.PORTAL_TRUSTED_PROXY_IDENTITY?.trim() ?? "";
-  const expectedIdentities = [
+  const [scheme, rest] = value.split(/\s+/u, 2);
+
+  if (scheme && rest && scheme.toLowerCase() === "bearer") {
+    return rest;
+  }
+
+  return headerName === "authorization" ? null : value;
+}
+
+/** The claims worth copying onto the account row. `sub` is the link — stable
+ *  for the life of the Pocket ID account, unlike an email. */
+function readSignInIdentity(claims: JwtClaims): PortalUserIdentity {
+  return {
+    subject: readStringClaim(claims, "sub") ?? "",
+    email: readStringClaim(claims, "email"),
+    displayName: readStringClaim(claims, "name") ?? readStringClaim(claims, "preferred_username")
+  };
+}
+
+function readStringClaim(claims: JwtClaims, name: string): string | null {
+  const value = claims[name];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function describe(account: { email: string | null; displayName: string | null; subject: string }): string {
+  return account.email ?? account.displayName ?? account.subject;
+}
+
+function assertNoRetiredIdentityConfig(config: NodeJS.ProcessEnv): void {
+  const present = Object.keys(retiredIdentityEnvVars).filter((name) => (config[name] ?? "").trim() !== "");
+
+  if (present.length === 0) {
+    return;
+  }
+
+  const reasons = [...new Set(present.map((name) => retiredIdentityEnvVars[name]))];
+
+  throw new Error(
+    `${present.join(", ")} no longer exist. ${reasons.join(" ")} ` +
+      "Configure PORTAL_OIDC_ISSUER and PORTAL_OIDC_AUDIENCE; roles are granted in the portal."
+  );
+}
+
+function requiredValue(config: NodeJS.ProcessEnv, name: string): string {
+  const value = config[name]?.trim() ?? "";
+
+  if (value === "") {
+    throw new Error(`${name} is required`);
+  }
+
+  return value;
+}
+
+function splitList(raw: string | undefined, options: { lowerCase: boolean }): string[] {
+  return [
     ...new Set(
-      rawIdentities
+      (raw ?? "")
         .split(",")
-        .map((entry) => entry.trim().toLowerCase())
+        .map((entry) => (options.lowerCase ? entry.trim().toLowerCase() : entry.trim()))
         .filter((entry) => entry !== "")
     )
   ];
-
-  if (expectedIdentities.length === 0) {
-    throw new Error(
-      "PORTAL_TRUSTED_PROXY_AUTH is enabled but PORTAL_TRUSTED_PROXY_IDENTITY is unset — refusing to trust an unvalidated header"
-    );
-  }
-
-  const allowAnyIdentity = expectedIdentities.includes("*");
-  const headerName = (config.PORTAL_TRUSTED_PROXY_HEADER?.trim() || "x-forwarded-email").toLowerCase();
-  const admin = configuredUser(config, "PORTAL_ADMIN", {
-    id: "portal-admin",
-    username: "admin",
-    displayName: "Administrator",
-    role: "admin",
-    password: "change-me"
-  });
-
-  return {
-    headerName,
-    expectedIdentities: allowAnyIdentity ? [] : expectedIdentities,
-    allowAnyIdentity,
-    user: { id: admin.id, username: admin.username, displayName: admin.displayName, role: admin.role }
-  };
 }
 
-function optionalConfiguredUser(
-  config: NodeJS.ProcessEnv,
-  prefix: string,
-  defaults: PortalUserDefaults
-): InMemoryIdentityRecord | null {
-  return hasConfiguredUser(config, prefix) ? configuredUser(config, prefix, defaults) : null;
-}
-
-function hasConfiguredUser(config: NodeJS.ProcessEnv, prefix: string): boolean {
-  return ["ID", "USERNAME", "PASSWORD", "DISPLAY_NAME", "ROLE"].some((field) => {
-    const value = config[`${prefix}_${field}`];
-    return value !== undefined && value.trim() !== "";
-  });
-}
-
-function configuredUser(config: NodeJS.ProcessEnv, prefix: string, defaults: PortalUserDefaults): InMemoryIdentityRecord {
-  const roleConfigName = `${prefix}_ROLE`;
-
-  return {
-    id: readConfigValue(config, `${prefix}_ID`, defaults.id),
-    username: readConfigValue(config, `${prefix}_USERNAME`, defaults.username),
-    displayName: readConfigValue(config, `${prefix}_DISPLAY_NAME`, defaults.displayName),
-    role: parseRole(config[roleConfigName] ?? defaults.role, roleConfigName),
-    password: readConfigValue(config, `${prefix}_PASSWORD`, defaults.password)
-  };
-}
-
-function readConfigValue(config: NodeJS.ProcessEnv, key: string, fallback: string): string {
-  const value = config[key];
-  return value === undefined || value.trim() === "" ? fallback : value;
-}
-
-function parseRole(value: string, configName: string): Role {
-  if (value === "admin" || value === "manager" || value === "viewer") {
-    return value;
-  }
-
-  throw new Error(`unknown ${configName} ${value}`);
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

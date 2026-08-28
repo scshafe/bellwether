@@ -65,15 +65,13 @@ export const fetchPortalStrategies = createAsyncThunk<
   void,
   { state: RootState; rejectValue: string }
 >("strategies/fetchPortalStrategies", async (_arg, { getState, rejectWithValue }) => {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
-  const response = await fetch("/portal/strategies", {
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch("/portal/strategies");
 
   if (!response.ok) {
     return rejectWithValue(`strategies rejected: ${response.status}`);
@@ -210,18 +208,15 @@ async function requestStrategyMutation(
   rejectWithValue: (value: string) => unknown,
   label: string
 ): Promise<StrategyRecord> {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session") as StrategyRecord;
   }
 
   const response = await fetch(path, {
     method,
-    headers: {
-      authorization: `Bearer ${token}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" })
-    },
+    headers: body === undefined ? {} : { "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
 

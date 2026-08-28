@@ -89,15 +89,13 @@ export const fetchPortalDecisions = createAsyncThunk<
   { state: RootState; rejectValue: string }
 >("decisions/fetchPortalDecisions", async (_arg, { getState, rejectWithValue }) => {
   const state = getState();
-  const token = state.auth.token;
+  const signedIn = state.auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
-  const response = await fetch(`/portal/decisions?limit=${state.decisions.limit}`, {
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch(`/portal/decisions?limit=${state.decisions.limit}`);
 
   if (!response.ok) {
     return rejectWithValue(`decisions rejected: ${response.status}`);

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import type { FormEvent, ReactElement, ReactNode } from "react";
 
 import { quantPlaybookParameterKeys, type QuantPlaybookParameterKey, type QuantPlaybookParameters } from "./quantPlaybookParameters";
-import { bootstrapSession, createSession, proxySignOutUrl, setPassword, setUsername, signOut, TRUSTED_PROXY_TOKEN } from "./store/authSlice";
+import { bootstrapSession, proxySignOutUrl } from "./store/authSlice";
 import { decisionsSelectors, fetchPortalDecisions, type PortalBrokerOrder, type PortalDecision, type PortalProposedOrder, type PortalQualitativeEvidence } from "./store/decisionsSlice";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { fetchPortalPositions, positionsSelectors, strategyPerformanceSelectors, type PortalAccount, type PortalPosition, type PortalStrategyPerformanceSummary } from "./store/positionsSlice";
@@ -49,6 +49,12 @@ import {
   type StrategyChatMetadata,
   type StrategyChatMode
 } from "./store/strategyChatSlice";
+import {
+  fetchPortalUsers,
+  updatePortalUser,
+  usersSelectors,
+  type PortalUserRecord
+} from "./store/usersSlice";
 import { setActiveTab, type WorkspaceTab } from "./store/workspaceSlice";
 
 const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
@@ -57,7 +63,8 @@ const tabs: Array<{ id: WorkspaceTab; label: string; status: string }> = [
   { id: "proposals", label: "Proposals", status: "P8e2" },
   { id: "roster", label: "Analyst Roster", status: "P7c" },
   { id: "strategies", label: "Strategy Workbench", status: "P6d" },
-  { id: "control", label: "Agent Control", status: "P4d" }
+  { id: "control", label: "Agent Control", status: "P4d" },
+  { id: "users", label: "Access", status: "live" }
 ];
 
 export function App(): ReactElement {
@@ -66,7 +73,12 @@ export function App(): ReactElement {
   const activeTab = useAppSelector((state) => state.workspace.activeTab);
   const canManageRuntime = auth.user ? isRuntimeManager(auth.user.role) : false;
   const canManageProposals = canManageRuntime;
-  const visibleTabs = canManageRuntime ? tabs : tabs.filter((tab) => tab.id !== "control");
+  // Granting access is admin-only: handing someone a role is how the boundary
+  // moves, which is a stronger act than operating the runtime.
+  const canManageAccess = auth.user?.role === "admin";
+  const visibleTabs = tabs.filter(
+    (tab) => (tab.id !== "control" || canManageRuntime) && (tab.id !== "users" || canManageAccess)
+  );
 
   const loadPortalData = () => {
     void dispatch(fetchPortalPositions());
@@ -75,16 +87,12 @@ export function App(): ReactElement {
     void dispatch(fetchRoster());
     void dispatch(fetchRuntimeStatus());
     void dispatch(fetchPortalStrategies());
+    void dispatch(fetchPortalUsers());
   };
 
-  const submitSession = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void dispatch(createSession()).unwrap().then(loadPortalData);
-  };
-
-  // Ambient-session probe: behind the OIDC proxy this succeeds immediately
-  // and the login panel never renders; in password mode it 401s and the app
-  // behaves exactly as before. Mount-once by design.
+  // The whole of sign-in: ask the server who the proxy says we are. There is
+  // no form and no fallback — un-proxied, this 401s and the portal stays shut.
+  // Mount-once by design.
   useEffect(() => {
     void dispatch(bootstrapSession()).unwrap().then(loadPortalData).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,28 +122,18 @@ export function App(): ReactElement {
               <span className="label">Session</span>
               <strong>{auth.user.displayName}</strong>
               <code>{auth.user.role}</code>
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => {
-                  if (auth.token === TRUSTED_PROXY_TOKEN) {
-                    window.location.assign(proxySignOutUrl());
-                  } else {
-                    dispatch(signOut());
-                  }
-                }}
-              >
+              <button type="button" className="ghost" onClick={() => window.location.assign(proxySignOutUrl())}>
                 Sign out
               </button>
             </>
           ) : (
-            <span className="muted">Authenticate to read portal data.</span>
+            <span className="muted">{auth.status === "checking" ? "Checking Pocket ID session..." : "Not signed in."}</span>
           )}
         </div>
       </section>
 
-      {!auth.token ? (
-        <LoginPanel onSubmit={submitSession} />
+      {!auth.user ? (
+        <SignInNotice />
       ) : (
         <section className="workspace">
           <nav className="tabs" aria-label="Portal workspace">
@@ -158,6 +156,7 @@ export function App(): ReactElement {
           {activeTab === "roster" ? <RosterWorkspace canManageRoster={canManageRuntime} /> : null}
           {activeTab === "strategies" ? <StrategiesWorkspace canManageStrategies={canManageRuntime} /> : null}
           {activeTab === "control" && canManageRuntime ? <ControlWorkspace /> : null}
+          {activeTab === "users" && canManageAccess ? <AccessWorkspace /> : null}
           {activeTab === "positions" || (activeTab === "control" && !canManageRuntime) ? <PositionsWorkspace /> : null}
         </section>
       )}
@@ -484,35 +483,124 @@ function QualitativeSlot({ evidence }: { evidence?: PortalQualitativeEvidence })
   );
 }
 
-function LoginPanel({ onSubmit }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void }): ReactElement {
-  const dispatch = useAppDispatch();
-  const { username, password, status, error } = useAppSelector((state) => state.auth);
+/** The signed-out door. The portal has no credential to collect: Pocket ID is
+ *  the only human login, and the OIDC proxy in front of the portal runs it.
+ *  Anyone who lands here reached the app past that proxy, so the only useful
+ *  thing to say is which address does go through it. */
+function SignInNotice(): ReactElement {
+  const status = useAppSelector((state) => state.auth.status);
+
+  if (status === "checking") {
+    return (
+      <section className="login-panel">
+        <p className="muted">Checking Pocket ID session...</p>
+      </section>
+    );
+  }
 
   return (
-    <form className="login-panel" onSubmit={onSubmit}>
+    <section className="login-panel">
       <div>
         <p className="eyebrow">Portal Session</p>
-        <h2>POST /auth/session</h2>
-        <p className="muted">Use the admin, manager, or viewer seeded in the running server environment.</p>
+        <h2>Sign in via Pocket ID</h2>
+        <p className="muted">
+          Bellwether has no login of its own. Reach the portal at its tailnet address, where the Pocket ID door signs
+          you in before the app is ever asked. This page is what a direct hit on the app port looks like.
+        </p>
       </div>
-      <label>
-        Username
-        <input value={username} onChange={(event) => dispatch(setUsername(event.target.value))} autoComplete="username" />
-      </label>
-      <label>
-        Password
-        <input
-          value={password}
-          onChange={(event) => dispatch(setPassword(event.target.value))}
-          type="password"
-          autoComplete="current-password"
-        />
-      </label>
-      <button type="submit" disabled={status === "loading"}>
-        {status === "loading" ? "Opening..." : "Open Portal"}
-      </button>
+    </section>
+  );
+}
+
+/** Who may use this portal. Every row is a Pocket ID account that has reached
+ *  the door at least once — knocking is what enrols someone, so nobody has to
+ *  transcribe an opaque subject to add a person. No credential is shown or
+ *  settable here, because none exists. */
+function AccessWorkspace(): ReactElement {
+  const dispatch = useAppDispatch();
+  const users = useAppSelector(usersSelectors.selectAll);
+  const status = useAppSelector((state) => state.users.status);
+  const error = useAppSelector((state) => state.users.error);
+  const signedInId = useAppSelector((state) => state.auth.user?.id ?? null);
+
+  return (
+    <section className="panel">
+      <header className="panel-header">
+        <div>
+          <p className="eyebrow">GET /portal/users</p>
+          <h2>Portal Access</h2>
+        </div>
+        <button type="button" onClick={() => dispatch(fetchPortalUsers())} disabled={status === "loading"}>
+          {status === "loading" ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
+
+      <p className="muted">
+        Pocket ID says who someone is; this says what they may do. Anyone who signs in appears here as pending — grant
+        a role to let them in, clear it to shut them out.
+      </p>
+
       {error ? <p className="error">{error}</p> : null}
-    </form>
+
+      {users.length === 0 ? (
+        <p className="empty">No accounts yet. The first person to sign in becomes the admin.</p>
+      ) : (
+        <div className="decision-list">
+          {users.map((user) => (
+            <AccessRow key={user.id} user={user} isSelf={user.id === signedInId} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AccessRow({ user, isSelf }: { user: PortalUserRecord; isSelf: boolean }): ReactElement {
+  const dispatch = useAppDispatch();
+  const name = user.displayName ?? user.email ?? user.subject;
+
+  return (
+    <article className="decision-card">
+      <header className="decision-card-header">
+        <div>
+          <p className="eyebrow">{user.email ?? "no email claim"}</p>
+          <h3>
+            {name}
+            {isSelf ? <span className="muted"> (you)</span> : null}
+          </h3>
+        </div>
+        <div className="id-stack">
+          <code>{user.status}</code>
+          <span>last seen {formatDateTime(user.lastSeenAt)}</span>
+        </div>
+      </header>
+
+      <p className="muted">
+        Pocket ID subject <code>{user.subject}</code> · first seen {formatDateTime(user.firstSeenAt)}
+      </p>
+
+      <div className="tabs">
+        {(["admin", "manager", "viewer"] as const).map((role) => (
+          <button
+            key={role}
+            type="button"
+            className={user.role === role && user.status === "active" ? "tab active" : "tab"}
+            aria-pressed={user.role === role && user.status === "active"}
+            onClick={() => void dispatch(updatePortalUser({ id: user.id, role }))}
+          >
+            <span>{role}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className={user.status === "active" ? "tab" : "tab active"}
+          aria-pressed={user.status !== "active"}
+          onClick={() => void dispatch(updatePortalUser({ id: user.id, role: null }))}
+        >
+          <span>no access</span>
+        </button>
+      </div>
+    </article>
   );
 }
 

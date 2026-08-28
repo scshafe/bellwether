@@ -7,6 +7,7 @@ import rosterReducer from "./store/rosterSlice";
 import runtimeReducer from "./store/runtimeSlice";
 import strategiesReducer from "./store/strategiesSlice";
 import strategyChatReducer from "./store/strategyChatSlice";
+import usersReducer from "./store/usersSlice";
 import workspaceReducer from "./store/workspaceSlice";
 
 export const store = configureStore({
@@ -19,6 +20,7 @@ export const store = configureStore({
     runtime: runtimeReducer,
     strategies: strategiesReducer,
     strategyChat: strategyChatReducer,
+    users: usersReducer,
     workspace: workspaceReducer
   }
 });

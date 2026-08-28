@@ -13,6 +13,20 @@ co-developed strategies, a family portal. Conception: see the Mission Control pl
 - `db`: Postgres placement for coordination and persistence in the trial compose stack.
 - `placement`: swappable seams for server endpoints, database URL, agent runtime placement, blob storage, and orchestration facade.
 
+## Sign-in
+
+Pocket ID is the only human credential. The portal implements no login: an
+oauth2-proxy door terminates OIDC and forwards the id token, and the server
+verifies that signature against Pocket ID's JWKS before believing it.
+Reached directly, every protected endpoint answers 401, a browser is redirected
+to the door, and the SPA renders no credential field. Roles are this app's own:
+`portal_users` links a Pocket ID subject to a role, and the portal's Access
+screen grants it. Signing in is what enrols someone as pending; an admin grants
+from there, with no redeploy and no credential anywhere.
+
+See [AUTH.md](AUTH.md) for the full decision, the configuration, and what was
+deleted.
+
 ## Paced Cadence Defaults
 
 - `PACED_CYCLE_INTERVAL_MS` controls the interval between paced trading cycles; default `300000` (5 minutes).

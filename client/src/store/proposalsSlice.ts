@@ -50,15 +50,13 @@ export const fetchPortalProposals = createAsyncThunk<
   void,
   { state: RootState; rejectValue: string }
 >("proposals/fetchPortalProposals", async (_arg, { getState, rejectWithValue }) => {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session");
   }
 
-  const response = await fetch("/portal/proposals", {
-    headers: { authorization: `Bearer ${token}` }
-  });
+  const response = await fetch("/portal/proposals");
 
   if (!response.ok) {
     return rejectWithValue(`proposals rejected: ${response.status}`);
@@ -125,18 +123,15 @@ async function requestProposalReview(
   getState: () => RootState,
   rejectWithValue: (value: string) => unknown
 ): Promise<ProposalReviewResponse> {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session") as ProposalReviewResponse;
   }
 
   const response = await fetch(`/portal/proposals/${encodeURIComponent(id)}/review`, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json"
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ decision })
   });
 

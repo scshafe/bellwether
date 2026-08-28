@@ -1,41 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { adminBoundaryRoles, canAccessRole, InMemoryIdentityProvider } from "./identity.js";
+import { adminBoundaryRoles, canAccessRole, familyBoundaryRoles } from "./identity.js";
 
-describe("InMemoryIdentityProvider", () => {
-  it("authenticates an admin and resolves the issued session", async () => {
-    const provider = new InMemoryIdentityProvider([
-      {
-        id: "user-cole",
-        username: "cole",
-        displayName: "Cole",
-        role: "admin",
-        password: "not-a-real-password"
-      }
-    ]);
-
-    const session = await provider.authenticate({ username: "cole", password: "not-a-real-password" });
-
-    assert.equal(session?.user.role, "admin");
-    assert.equal(session?.user.displayName, "Cole");
-    assert.deepEqual(await provider.identifySession(session?.token ?? ""), session?.user);
-  });
-
-  it("rejects invalid credentials", async () => {
-    const provider = new InMemoryIdentityProvider([
-      {
-        id: "user-cole",
-        username: "cole",
-        displayName: "Cole",
-        role: "admin",
-        password: "not-a-real-password"
-      }
-    ]);
-
-    assert.equal(await provider.authenticate({ username: "cole", password: "wrong-password" }), null);
-  });
-
+describe("role boundaries", () => {
   it("treats admin and manager as admin-boundary roles", () => {
     assert.equal(
       canAccessRole({ id: "user-cole", username: "cole", displayName: "Cole", role: "admin" }, adminBoundaryRoles),
@@ -49,5 +17,32 @@ describe("InMemoryIdentityProvider", () => {
       canAccessRole({ id: "user-family", username: "family", displayName: "Family", role: "viewer" }, adminBoundaryRoles),
       false
     );
+  });
+
+  it("admits every role at the family boundary", () => {
+    assert.equal(
+      canAccessRole({ id: "user-family", username: "family", displayName: "Family", role: "viewer" }, familyBoundaryRoles),
+      true
+    );
+  });
+});
+
+describe("the deleted in-app credential system", () => {
+  it("exports no identity provider, no password check, and no session mint", async () => {
+    // Constructed the way the removed code was used. These names are gone, not
+    // disabled: there is nothing left in this module that could check a
+    // password or issue a session token.
+    const identity = (await import("./identity.js")) as Record<string, unknown>;
+
+    for (const removed of [
+      "InMemoryIdentityProvider",
+      "IdentityProvider",
+      "AuthCredentials",
+      "AuthSession",
+      "TrustedProxyAuthConfig",
+      "InMemoryIdentityRecord"
+    ]) {
+      assert.equal(identity[removed], undefined, `identity.js still exports ${removed}`);
+    }
   });
 });

@@ -6,12 +6,19 @@ import {
   adminBoundaryRoles,
   canAccessRole,
   familyBoundaryRoles,
-  type AuthCredentials,
+  userAdminRoles,
   type AuthenticatedUser,
-  type IdentityProvider,
-  type Role,
-  type TrustedProxyAuthConfig
+  type IdentityResolver,
+  type Role
 } from "./identity.js";
+import {
+  isPortalUserStatus,
+  isRole,
+  LastAdminError,
+  PortalUserNotFoundError,
+  type PortalUserPatch,
+  type PortalUsersStore
+} from "./portal-users.js";
 import type { AgentDecisionLogEntry, AgentDecisionLogStore } from "./agent-team.js";
 import type { BrokerAccount, BrokerAdapter, BrokerPosition } from "./broker.js";
 import { DEFAULT_QUANT_PLAYBOOK_PARAMETERS, type QuantPlaybookParameters } from "./quant-playbook.js";
@@ -50,7 +57,11 @@ import type { ReasoningModel } from "./llm.js";
 
 export type ServerOptions = {
   databaseUrl?: string;
-  identityProvider?: IdentityProvider;
+  /** The portal's only identity source: a Pocket ID token, verified against
+   *  the issuer's JWKS, forwarded by oauth2-proxy. There is no second lane —
+   *  no password, no header the app takes on faith. Absent, every protected
+   *  route fails closed. See portal-identity.ts. */
+  resolveIdentity?: IdentityResolver;
   broker?: BrokerAdapter;
   decisionLogStore?: AgentDecisionLogStore;
   runtimeControl?: AgentRuntimeControl;
@@ -59,12 +70,15 @@ export type ServerOptions = {
   strategyChatStore?: StrategyChatStore;
   strategyChatModel?: ReasoningModel;
   sourcesStore?: SourcesStore;
+  /** The portal's own account table — who may do what, once Pocket ID has
+   *  said who they are. Holds no credential. */
+  portalUsersStore?: PortalUsersStore;
   env?: NodeJS.ProcessEnv;
   staticAssetsDir?: string;
-  /** When set, an OIDC reverse proxy owns authentication: requireRole trusts
-   *  ONLY the configured identity header (never Bearer tokens) and the
-   *  password login route returns 404. See identity.ts. */
-  trustedProxyAuth?: TrustedProxyAuthConfig;
+  /** The address the OIDC door answers on. A browser that reaches the app's
+   *  own port instead is sent here rather than served a shell it could never
+   *  sign in from. */
+  publicBaseUrl?: string;
 };
 
 export async function handleRequest(
@@ -79,16 +93,34 @@ export async function handleRequest(
     return;
   }
 
-  if (request.method === "POST" && url.pathname === "/auth/session") {
-    if (options.trustedProxyAuth) {
-      // Proxy-identity mode: the password lane must be structurally
-      // unreachable — the identity provider is never consulted, so no
-      // password session can ever be minted while the flag is on.
-      writeJson(response, 404, { error: "not_found" });
+  if (request.method === "GET" && url.pathname === "/portal/users") {
+    // Granting access is strictly more sensitive than operating the runtime,
+    // so this is the one surface a manager does not reach.
+    const user = await requireRole(request, response, options, userAdminRoles);
+
+    if (!user) {
       return;
     }
 
-    await handleSessionCreate(request, response, options.identityProvider);
+    if (!options.portalUsersStore) {
+      writeJson(response, 503, { error: "portal_users_unavailable" });
+      return;
+    }
+
+    writeJson(response, 200, { users: await options.portalUsersStore.listUsers() });
+    return;
+  }
+
+  const portalUserId = parsePortalUserRoute(url.pathname);
+
+  if (request.method === "PATCH" && portalUserId) {
+    const user = await requireRole(request, response, options, userAdminRoles);
+
+    if (!user) {
+      return;
+    }
+
+    await handlePortalUserUpdate(request, response, options.portalUsersStore, portalUserId, user.id);
     return;
   }
 
@@ -310,11 +342,55 @@ export async function handleRequest(
     return;
   }
 
+  if (redirectToDoor(request, response, url, options.publicBaseUrl)) {
+    return;
+  }
+
   if (await handleStaticAssets(request, response, url, options.staticAssetsDir)) {
     return;
   }
 
   writeJson(response, 404, { error: "not_found" });
+}
+
+/** The app answers on its own port to anything that can route to it — a tailnet
+ *  peer, a neighbour in the same network namespace. That port is not where a
+ *  human belongs: the OIDC door lives at the public URL, and only requests
+ *  arriving through it carry an identity. Send browsers there instead of
+ *  serving a shell that can never sign in.
+ *
+ *  Deliberately narrow. Data routes have already answered 401/403 above, so no
+ *  XHR ever gets a surprise 302; /healthz answered before that, so the deploy
+ *  probe and the container healthcheck are untouched. And a request that
+ *  carries a token is left alone — the door always forwards one, which is what
+ *  makes a redirect loop impossible even if the proxy stops preserving Host. */
+function redirectToDoor(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  publicBaseUrl: string | undefined
+): boolean {
+  if (!publicBaseUrl || (request.method !== "GET" && request.method !== "HEAD") || request.headers.authorization) {
+    return false;
+  }
+
+  const host = request.headers.host ?? "";
+  let door: URL;
+
+  try {
+    door = new URL(publicBaseUrl);
+  } catch {
+    return false;
+  }
+
+  if (host === "" || host.toLowerCase() === door.host.toLowerCase()) {
+    return false;
+  }
+
+  response.writeHead(302, { location: new URL(`${url.pathname}${url.search}`, door).href, "cache-control": "no-store" });
+  response.end();
+
+  return true;
 }
 
 export function createServer(options: ServerOptions = {}): Server {
@@ -326,31 +402,78 @@ export function createServer(options: ServerOptions = {}): Server {
   });
 }
 
-async function handleSessionCreate(
+export function parsePortalUserRoute(pathname: string): string | null {
+  const segments = pathname.split("/").filter((segment) => segment !== "");
+
+  if (segments.length !== 3 || segments[0] !== "portal" || segments[1] !== "users") {
+    return null;
+  }
+
+  return segments[2] ?? null;
+}
+
+async function handlePortalUserUpdate(
   request: IncomingMessage,
   response: ServerResponse,
-  identityProvider?: IdentityProvider
+  portalUsersStore: PortalUsersStore | undefined,
+  id: string,
+  actorId: string
 ): Promise<void> {
-  if (!identityProvider) {
-    writeJson(response, 503, { error: "identity_unavailable" });
+  if (!portalUsersStore) {
+    writeJson(response, 503, { error: "portal_users_unavailable" });
     return;
   }
 
   const body = await readJsonBody(request);
+  const patch = parsePortalUserPatch(body);
 
-  if (!isAuthCredentials(body)) {
-    writeJson(response, 400, { error: "invalid_auth_payload" });
+  if (patch === invalidField) {
+    writeJson(response, 400, { error: "invalid_portal_user_patch" });
     return;
   }
 
-  const session = await identityProvider.authenticate(body);
+  try {
+    writeJson(response, 200, { user: await portalUsersStore.updateUser(id, patch, actorId) });
+  } catch (error: unknown) {
+    if (error instanceof PortalUserNotFoundError) {
+      writeJson(response, 404, { error: "not_found" });
+      return;
+    }
 
-  if (!session) {
-    writeJson(response, 401, { error: "invalid_credentials" });
-    return;
+    if (error instanceof LastAdminError) {
+      writeJson(response, 409, { error: "last_admin" });
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function parsePortalUserPatch(body: unknown): PortalUserPatch | typeof invalidField {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return invalidField;
   }
 
-  writeJson(response, 200, session);
+  const candidate = body as Record<string, unknown>;
+  const patch: PortalUserPatch = {};
+
+  if ("role" in candidate) {
+    if (candidate.role !== null && !isRole(candidate.role)) {
+      return invalidField;
+    }
+
+    patch.role = candidate.role;
+  }
+
+  if ("status" in candidate) {
+    if (!isPortalUserStatus(candidate.status)) {
+      return invalidField;
+    }
+
+    patch.status = candidate.status;
+  }
+
+  return patch.role === undefined && patch.status === undefined ? invalidField : patch;
 }
 
 async function handlePortalPositions(
@@ -1099,74 +1222,50 @@ async function requireRole(
   options: ServerOptions,
   allowedRoles: readonly Role[]
 ): Promise<AuthenticatedUser | null> {
-  const trustedProxyAuth = options.trustedProxyAuth;
+  const resolveIdentity = options.resolveIdentity;
 
-  if (trustedProxyAuth) {
-    // Reverse-proxy identity mode. The header is trustworthy only because the
-    // OIDC proxy (same netns) is the sole path to this listener and rewrites
-    // X-Forwarded-* on every proxied request; anything else in the namespace
-    // is a trusted stack member with DB credentials anyway. NEVER fall
-    // through to the Bearer path in this mode — the browser client sends a
-    // sentinel token that must stay meaningless.
-    const raw = request.headers[trustedProxyAuth.headerName];
-    const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-    const identityAccepted =
-      value !== "" && (trustedProxyAuth.allowAnyIdentity || trustedProxyAuth.expectedIdentities.includes(value));
-
-    if (!identityAccepted) {
-      writeJson(response, 401, { error: "invalid_session" });
-      return null;
-    }
-
-    if (!canAccessRole(trustedProxyAuth.user, allowedRoles)) {
-      writeJson(response, 403, { error: "forbidden" });
-      return null;
-    }
-
-    return trustedProxyAuth.user;
-  }
-
-  const identityProvider = options.identityProvider;
-
-  if (!identityProvider) {
+  if (!resolveIdentity) {
     writeJson(response, 503, { error: "identity_unavailable" });
     return null;
   }
 
-  const token = getBearerToken(request.headers.authorization);
+  const resolution = await resolveIdentity(request.headers);
 
-  if (!token) {
-    writeJson(response, 401, { error: "missing_session" });
+  if (resolution.status === "unavailable") {
+    // Cannot decide, so decide nothing. An identity provider outage is not a
+    // failed login and must not read as one.
+    console.error(`identity verification unavailable: ${resolution.detail}`);
+    writeJson(response, 503, { error: "identity_unavailable" });
     return null;
   }
 
-  const user = await identityProvider.identifySession(token);
+  if (resolution.status === "anonymous") {
+    if (resolution.detail) {
+      // The only place a rejected token says why. Without it, a portal that
+      // 401s everything is undebuggable from the outside.
+      console.warn(`rejected token: ${resolution.detail}`);
+    }
 
-  if (!user) {
-    writeJson(response, 401, { error: "invalid_session" });
+    writeJson(response, 401, {
+      error: resolution.reason === "missing_token" ? "missing_session" : "invalid_session"
+    });
     return null;
   }
 
-  if (!canAccessRole(user, allowedRoles)) {
+  if (resolution.status === "unprovisioned") {
+    // Authenticated by Pocket ID, enrolled in portal_users, and granted
+    // nothing yet. A valid login is not a portal account.
+    console.warn(`no portal access for ${resolution.identity} (account ${resolution.accountStatus})`);
+    writeJson(response, 403, { error: "not_provisioned" });
+    return null;
+  }
+
+  if (!canAccessRole(resolution.user, allowedRoles)) {
     writeJson(response, 403, { error: "forbidden" });
     return null;
   }
 
-  return user;
-}
-
-function getBearerToken(authorization: string | string[] | undefined): string | null {
-  if (typeof authorization !== "string") {
-    return null;
-  }
-
-  const [scheme, token] = authorization.split(" ");
-
-  if (scheme !== "Bearer" || !token) {
-    return null;
-  }
-
-  return token;
+  return resolution.user;
 }
 
 function parseDecisionLimit(url: URL): number {
@@ -1577,15 +1676,6 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 
   return JSON.parse(body) as unknown;
-}
-
-function isAuthCredentials(value: unknown): value is AuthCredentials {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  return typeof candidate.username === "string" && typeof candidate.password === "string";
 }
 
 function writeJson(response: ServerResponse, statusCode: number, body: unknown): void {

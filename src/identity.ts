@@ -1,9 +1,16 @@
+import type { IncomingHttpHeaders } from "node:http";
+
+import type { PortalUserStatus } from "./portal-users.js";
+
 export const roles = ["admin", "manager", "viewer"] as const;
 
 export type Role = (typeof roles)[number];
 
 export const adminBoundaryRoles: readonly Role[] = ["admin", "manager"];
 export const familyBoundaryRoles: readonly Role[] = ["admin", "manager", "viewer"];
+/** Granting access is the one thing a manager does not get: operating the
+ *  runtime is reversible, handing someone a role is how the boundary moves. */
+export const userAdminRoles: readonly Role[] = ["admin"];
 
 export type AuthenticatedUser = {
   id: string;
@@ -12,83 +19,26 @@ export type AuthenticatedUser = {
   role: Role;
 };
 
-export type AuthCredentials = {
-  username: string;
-  password: string;
-};
+/** The verdict on one request's identity.
+ *
+ *  The portal holds no credential of its own — there is no password to check
+ *  and no session to mint. A human is whoever Pocket ID says they are, proven
+ *  by a signature over the forwarded id token, and *which* human decides the
+ *  role. Authentication is the identity provider's; authorization is ours. */
+export type IdentityResolution =
+  | { status: "authenticated"; user: AuthenticatedUser }
+  /** No token, or one the identity provider did not sign — answer 401. */
+  | { status: "anonymous"; reason: "missing_token" | "invalid_token"; detail?: string }
+  /** A real Pocket ID user whose portal account grants nothing yet — knocking
+   *  enrols them as `pending`, but a valid login is not access: answer 403,
+   *  never a session, until an admin grants a role. */
+  | { status: "unprovisioned"; identity: string; accountStatus: PortalUserStatus }
+  /** The identity provider's keys are unreachable, so no verdict is possible —
+   *  answer 503. Never 401: an outage is not a failed login. */
+  | { status: "unavailable"; detail: string };
 
-export type AuthSession = {
-  token: string;
-  user: AuthenticatedUser;
-};
-
-export interface IdentityProvider {
-  authenticate(credentials: AuthCredentials): Promise<AuthSession | null>;
-  identifySession(token: string): Promise<AuthenticatedUser | null>;
-}
-
-/** Reverse-proxy identity mode: an OIDC-authenticating proxy (oauth2-proxy in
- *  front of the portal, same network namespace) is the only path to the
- *  listener and stamps the authenticated identity into a request header. When
- *  configured, the server trusts THAT header — matched against the one
- *  expected identity — and maps it to the seeded admin portal user; the
- *  password login route goes dark and Bearer tokens are ignored entirely. */
-export type TrustedProxyAuthConfig = {
-  /** Lower-cased header name carrying the identity (default x-forwarded-email). */
-  headerName: string;
-  /** Lower-cased identities (Pocket ID emails) allowed to act as the shared
-   *  account. Multiple people, ONE portal user — the shared-account model. */
-  expectedIdentities: readonly string[];
-  /** True when the operator configured "*": ANY identity the proxy forwards is
-   *  accepted — authorization is fully delegated to the IdP's per-client
-   *  allowed-groups gate. An explicit opt-in, never a default. */
-  allowAnyIdentity: boolean;
-  /** The portal user every authenticated request acts as (the seeded admin). */
-  user: AuthenticatedUser;
-};
-
-export type InMemoryIdentityRecord = AuthenticatedUser & {
-  password: string;
-};
-
-export class InMemoryIdentityProvider implements IdentityProvider {
-  readonly #usersByUsername = new Map<string, InMemoryIdentityRecord>();
-  readonly #sessionsByToken = new Map<string, AuthenticatedUser>();
-
-  constructor(users: InMemoryIdentityRecord[] = []) {
-    for (const user of users) {
-      this.#usersByUsername.set(user.username, user);
-    }
-  }
-
-  async authenticate(credentials: AuthCredentials): Promise<AuthSession | null> {
-    const record = this.#usersByUsername.get(credentials.username);
-
-    if (!record || record.password !== credentials.password) {
-      return null;
-    }
-
-    const user = toAuthenticatedUser(record);
-    const token = `in-memory-session:${user.id}`;
-    this.#sessionsByToken.set(token, user);
-
-    return { token, user };
-  }
-
-  async identifySession(token: string): Promise<AuthenticatedUser | null> {
-    return this.#sessionsByToken.get(token) ?? null;
-  }
-}
+export type IdentityResolver = (headers: IncomingHttpHeaders) => Promise<IdentityResolution>;
 
 export function canAccessRole(user: AuthenticatedUser, allowedRoles: readonly Role[]): boolean {
   return allowedRoles.includes(user.role);
-}
-
-function toAuthenticatedUser(record: InMemoryIdentityRecord): AuthenticatedUser {
-  return {
-    id: record.id,
-    username: record.username,
-    displayName: record.displayName,
-    role: record.role
-  };
 }

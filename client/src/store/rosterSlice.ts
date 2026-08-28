@@ -60,15 +60,13 @@ const initialState = rosterAdapter.getInitialState({
 export const fetchRoster = createAsyncThunk<PortalRosterResponse, void, { state: RootState; rejectValue: string }>(
   "roster/fetchRoster",
   async (_arg, { getState, rejectWithValue }) => {
-    const token = getState().auth.token;
+    const signedIn = getState().auth.user !== null;
 
-    if (!token) {
+    if (!signedIn) {
       return rejectWithValue("missing session");
     }
 
-    const response = await fetch("/portal/roster", {
-      headers: { authorization: `Bearer ${token}` }
-    });
+    const response = await fetch("/portal/roster");
 
     if (!response.ok) {
       return rejectWithValue(`roster rejected: ${response.status}`);
@@ -107,16 +105,13 @@ export const updateSource = createAsyncThunk<SourceRecord, SourceUpdatePatch, { 
 export const deleteSource = createAsyncThunk<string, string, { state: RootState; rejectValue: string }>(
   "roster/deleteSource",
   async (id, { getState, rejectWithValue }) => {
-    const token = getState().auth.token;
+    const signedIn = getState().auth.user !== null;
 
-    if (!token) {
+    if (!signedIn) {
       return rejectWithValue("missing session");
     }
 
-    const response = await fetch(`/portal/roster/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      headers: { authorization: `Bearer ${token}` }
-    });
+    const response = await fetch(`/portal/roster/${encodeURIComponent(id)}`, { method: "DELETE" });
 
     if (!response.ok) {
       return rejectWithValue(`source delete rejected: ${response.status}`);
@@ -188,18 +183,15 @@ async function requestSourceMutation(
   rejectWithValue: (value: string) => unknown,
   label: string
 ): Promise<SourceRecord> {
-  const token = getState().auth.token;
+  const signedIn = getState().auth.user !== null;
 
-  if (!token) {
+  if (!signedIn) {
     return rejectWithValue("missing session") as SourceRecord;
   }
 
   const response = await fetch(path, {
     method,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json"
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
   });
 

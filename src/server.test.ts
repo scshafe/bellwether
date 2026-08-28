@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -16,8 +16,11 @@ import type {
   BrokerOrderRequest,
   BrokerPosition
 } from "./broker.js";
-import { InMemoryIdentityProvider, type InMemoryIdentityRecord } from "./identity.js";
+import type { IdentityResolver } from "./identity.js";
 import type { LlmJsonRequest, ReasoningModel } from "./llm.js";
+import { TestOidcIssuer } from "./oidc-test-issuer.js";
+import { createPortalIdentityResolver, readPortalIdentityConfig } from "./portal-identity.js";
+import { InMemoryPortalUsersStore, type PortalUserRecord, type PortalUsersStore } from "./portal-users.js";
 import { InMemorySourcesStore, type SourceRecord } from "./qualitative.js";
 import type { AgentRuntimeControl, AgentRuntimeStatus } from "./runtime-control.js";
 import { createServer, parseRosterRoute, type ServerOptions } from "./server.js";
@@ -246,46 +249,58 @@ async function closeTestServer(server: Server): Promise<void> {
   });
 }
 
-function testIdentityProvider(): InMemoryIdentityProvider {
-  const users: InMemoryIdentityRecord[] = [
-    {
-      id: "user-cole",
-      username: "cole",
-      displayName: "Cole",
-      role: "admin",
-      password: "not-a-real-password"
-    },
-    {
-      id: "user-brother",
-      username: "brother",
-      displayName: "Brother",
-      role: "manager",
-      password: "not-a-real-password"
-    },
-    {
-      id: "user-family",
-      username: "family",
-      displayName: "Family",
-      role: "viewer",
-      password: "not-a-real-password"
-    }
-  ];
+/** One fake Pocket ID for the whole suite. Every request below carries a real
+ *  signed id token, and the role behind it comes from a real account table:
+ *  the API tests exercise the same two steps the deployment does. */
+const testIssuer = new TestOidcIssuer();
 
-  return new InMemoryIdentityProvider(users);
+const portalUsers = {
+  cole: { sub: "pocket-id-cole", email: "cole@example.com", name: "Cole", role: "admin" },
+  brother: { sub: "pocket-id-brother", email: "brother@example.com", name: "Brother", role: "manager" },
+  family: { sub: "pocket-id-family", email: "family@example.com", name: "Family", role: "viewer" }
+} as const;
+
+/** An account table with the three portal users already granted, so a test
+ *  starts from an established portal rather than the bootstrap case. */
+async function seededPortalUsers(): Promise<InMemoryPortalUsersStore> {
+  const users = new InMemoryPortalUsersStore();
+  const admin = await users.recordSignIn({
+    subject: portalUsers.cole.sub,
+    email: portalUsers.cole.email,
+    displayName: portalUsers.cole.name
+  });
+
+  for (const person of [portalUsers.brother, portalUsers.family]) {
+    const account = await users.recordSignIn({ subject: person.sub, email: person.email, displayName: person.name });
+    await users.updateUser(account.id, { role: person.role }, admin.id);
+  }
+
+  return users;
 }
 
-async function authenticate(baseUrl: string, username: string): Promise<string> {
-  const response = await fetch(`${baseUrl}/auth/session`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username, password: "not-a-real-password" })
-  });
-  const body = (await response.json()) as { token?: string };
+function testIdentityResolver(users: PortalUsersStore): IdentityResolver {
+  return createPortalIdentityResolver(
+    readPortalIdentityConfig({
+      PORTAL_OIDC_ISSUER: testIssuer.issuer,
+      PORTAL_OIDC_AUDIENCE: testIssuer.audience
+    }),
+    users,
+    { fetchImpl: testIssuer.fetch }
+  );
+}
 
-  assert.equal(response.status, 200);
-  assert.equal(typeof body.token, "string");
+/** A server whose accounts are already granted — the ordinary case. */
+async function startPortalServer(options: ServerOptions = {}): Promise<{ baseUrl: string; server: Server }> {
+  const portalUsersStore = await seededPortalUsers();
 
-  return body.token ?? "";
+  return startTestServer({ resolveIdentity: testIdentityResolver(portalUsersStore), portalUsersStore, ...options });
+}
+
+/** The token oauth2-proxy would forward for one of those humans. */
+function idTokenFor(user: keyof typeof portalUsers): string {
+  const person = portalUsers[user];
+
+  return testIssuer.idToken({ sub: person.sub, email: person.email, name: person.name });
 }
 
 function strategyParameters(overrides: Partial<QuantPlaybookParameters> = {}): QuantPlaybookParameters {
@@ -358,7 +373,7 @@ describe("identity API boundary", () => {
   let baseUrl = "";
 
   before(async () => {
-    const started = await startTestServer({ identityProvider: testIdentityProvider() });
+    const started = await startPortalServer();
     server = started.server;
     baseUrl = started.baseUrl;
   });
@@ -368,7 +383,7 @@ describe("identity API boundary", () => {
   });
 
   it("allows an admin to authenticate and reach admin endpoints", async () => {
-    const token = await authenticate(baseUrl, "cole");
+    const token = idTokenFor("cole");
     const response = await fetch(`${baseUrl}/admin/roles`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -379,7 +394,7 @@ describe("identity API boundary", () => {
   });
 
   it("allows a manager to reach admin endpoints", async () => {
-    const token = await authenticate(baseUrl, "brother");
+    const token = idTokenFor("brother");
     const response = await fetch(`${baseUrl}/admin/roles`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -390,7 +405,7 @@ describe("identity API boundary", () => {
   });
 
   it("blocks a view-only family user from admin endpoints", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/admin/roles`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -400,7 +415,7 @@ describe("identity API boundary", () => {
   });
 
   it("allows a view-only family user to reach family overview", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/family/overview`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -418,21 +433,115 @@ describe("identity API boundary", () => {
   });
 });
 
-describe("trusted proxy identity boundary", () => {
+describe("Pocket ID is the only way in", () => {
   let server: Server;
   let baseUrl = "";
 
   before(async () => {
-    const started = await startTestServer({
-      // The identity provider is deliberately wired too — these tests prove
-      // the Bearer path is DEAD in proxy mode, not merely unconfigured.
-      identityProvider: testIdentityProvider(),
-      trustedProxyAuth: {
-        headerName: "x-forwarded-email",
-        expectedIdentities: ["cole@example.com", "family@example.com"],
-        allowAnyIdentity: false,
-        user: { id: "portal-admin", username: "cole", displayName: "Cole", role: "admin" }
+    const started = await startPortalServer();
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  it("refuses a forwarded identity header with no signed token behind it", async () => {
+    // The retired mode believed X-Forwarded-Email on sight. Anything that
+    // reaches this port directly can set that header, so identity now travels
+    // only as a signature.
+    const forwardedHeaders: Array<Record<string, string>> = [
+      { "x-forwarded-email": "cole@example.com" },
+      { "x-forwarded-user": "cole@example.com" },
+      { "x-auth-request-email": "cole@example.com" },
+      { "x-forwarded-groups": "bellwether-admins" },
+      { "x-forwarded-email": "cole@example.com", "x-forwarded-user": "cole" }
+    ];
+
+    for (const headers of forwardedHeaders) {
+      const response = await fetch(`${baseUrl}/admin/roles`, { headers });
+
+      assert.equal(response.status, 401, `${JSON.stringify(headers)} must not authenticate anyone`);
+      assert.deepEqual(await response.json(), { error: "missing_session" });
+    }
+  });
+
+  it("refuses a token signed by anyone but the configured issuer", async () => {
+    const attacker = new TestOidcIssuer({ issuer: testIssuer.issuer, audience: testIssuer.audience });
+    const response = await fetch(`${baseUrl}/admin/roles`, {
+      headers: { authorization: `Bearer ${attacker.idToken({ sub: portalUsers.cole.sub, email: portalUsers.cole.email })}` }
+    });
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), { error: "invalid_session" });
+  });
+
+  it("refuses an expired token from the real issuer", async () => {
+    const expired = testIssuer.idToken({
+      sub: portalUsers.cole.sub,
+      email: portalUsers.cole.email,
+      exp: Math.floor(Date.now() / 1000) - 3_600
+    });
+    const response = await fetch(`${baseUrl}/admin/roles`, { headers: { authorization: `Bearer ${expired}` } });
+
+    assert.equal(response.status, 401);
+  });
+
+  it("gives a valid Pocket ID user with no granted account nothing, not admin", async () => {
+    const stranger = testIssuer.idToken({ sub: "pocket-id-stranger", email: "stranger@example.com" });
+
+    for (const path of ["/admin/roles", "/family/overview", "/portal/positions"]) {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { authorization: `Bearer ${stranger}` } });
+
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), { error: "not_provisioned" });
+    }
+  });
+
+  it("serves the signed-out SPA shell while refusing its data", async () => {
+    const staticDir = await mkdtemp(join(tmpdir(), "portal-shell-"));
+    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>Bellwether</title>");
+    const started = await startPortalServer({ staticAssetsDir: staticDir });
+
+    try {
+      const shell = await fetch(`${started.baseUrl}/`);
+      const data = await fetch(`${started.baseUrl}/portal/positions`);
+
+      assert.equal(shell.status, 200, "the app shell is public; the door is in front of it");
+      assert.equal(data.status, 401);
+    } finally {
+      await closeTestServer(started.server);
+      await rm(staticDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when no identity source is configured at all", async () => {
+    const started = await startTestServer({});
+
+    try {
+      for (const path of ["/admin/roles", "/family/overview", "/portal/positions", "/portal/strategies"]) {
+        const response = await fetch(`${started.baseUrl}${path}`);
+
+        assert.equal(response.status, 503);
+        assert.deepEqual(await response.json(), { error: "identity_unavailable" });
       }
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("portal accounts API", () => {
+  let server: Server;
+  let baseUrl = "";
+  let users: InMemoryPortalUsersStore;
+
+  before(async () => {
+    users = await seededPortalUsers();
+    const started = await startTestServer({
+      resolveIdentity: testIdentityResolver(users),
+      portalUsersStore: users
     });
     server = started.server;
     baseUrl = started.baseUrl;
@@ -442,64 +551,381 @@ describe("trusted proxy identity boundary", () => {
     await closeTestServer(server);
   });
 
-  it("authenticates the proxied identity header as the admin portal user", async () => {
-    const response = await fetch(`${baseUrl}/admin/roles`, {
-      headers: { "x-forwarded-email": "cole@example.com" }
+  async function listUsers(token: string): Promise<{ status: number; users: PortalUserRecord[] }> {
+    const response = await fetch(`${baseUrl}/portal/users`, { headers: { authorization: `Bearer ${token}` } });
+    const body = (await response.json()) as { users?: PortalUserRecord[] };
+
+    return { status: response.status, users: body.users ?? [] };
+  }
+
+  it("lists the accounts to an admin, with their Pocket ID link", async () => {
+    const listed = await listUsers(idTokenFor("cole"));
+
+    assert.equal(listed.status, 200);
+    assert.deepEqual(
+      listed.users.map((user) => user.subject).sort(),
+      [portalUsers.cole.sub, portalUsers.brother.sub, portalUsers.family.sub].sort()
+    );
+    assert.ok(
+      listed.users.every((user) => user.subject.startsWith("pocket-id-")),
+      "every account is linked to a Pocket ID subject"
+    );
+  });
+
+  it("keeps managers out — granting access is not a runtime control", async () => {
+    for (const who of ["brother", "family"] as const) {
+      const response = await fetch(`${baseUrl}/portal/users`, {
+        headers: { authorization: `Bearer ${idTokenFor(who)}` }
+      });
+
+      assert.equal(response.status, 403, `${who} must not see the account list`);
+      assert.deepEqual(await response.json(), { error: "forbidden" });
+    }
+  });
+
+  it("enrols whoever knocks, then grants them access in one PATCH", async () => {
+    const knocking = testIssuer.idToken({ sub: "pocket-id-newcomer", email: "newcomer@example.com", name: "Newcomer" });
+
+    const refused = await fetch(`${baseUrl}/family/overview`, { headers: { authorization: `Bearer ${knocking}` } });
+    assert.equal(refused.status, 403);
+
+    // The knock is what put them on the list — nobody typed a subject.
+    const listed = await listUsers(idTokenFor("cole"));
+    const newcomer = listed.users.find((user) => user.subject === "pocket-id-newcomer");
+    assert.equal(newcomer?.status, "pending");
+    assert.equal(newcomer?.email, "newcomer@example.com");
+
+    const granted = await patchJson(baseUrl, `/portal/users/${newcomer?.id}`, idTokenFor("cole"), { role: "viewer" });
+    assert.equal(granted.status, 200);
+
+    const admitted = await fetch(`${baseUrl}/family/overview`, { headers: { authorization: `Bearer ${knocking}` } });
+    const body = (await admitted.json()) as { user?: { role?: string } };
+
+    assert.equal(admitted.status, 200, "the grant takes effect on the next request, with no redeploy");
+    assert.equal(body.user?.role, "viewer");
+  });
+
+  it("revokes access on the next request", async () => {
+    const listed = await listUsers(idTokenFor("cole"));
+    const family = listed.users.find((user) => user.subject === portalUsers.family.sub);
+
+    const revoked = await patchJson(baseUrl, `/portal/users/${family?.id}`, idTokenFor("cole"), { role: null });
+    assert.equal(revoked.status, 200);
+
+    const after = await fetch(`${baseUrl}/family/overview`, {
+      headers: { authorization: `Bearer ${idTokenFor("family")}` }
     });
-    const body = (await response.json()) as { user?: { id?: string; role?: string } };
+
+    assert.equal(after.status, 403);
+    assert.deepEqual(await after.json(), { error: "not_provisioned" });
+
+    await patchJson(baseUrl, `/portal/users/${family?.id}`, idTokenFor("cole"), { role: "viewer" });
+  });
+
+  it("refuses to leave the portal with no admin", async () => {
+    const listed = await listUsers(idTokenFor("cole"));
+    const admin = listed.users.find((user) => user.subject === portalUsers.cole.sub);
+    const response = await patchJson(baseUrl, `/portal/users/${admin?.id}`, idTokenFor("cole"), { role: "viewer" });
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: "last_admin" });
+  });
+
+  it("rejects unknown ids and malformed patches before touching the store", async () => {
+    const admin = idTokenFor("cole");
+    const missing = await patchJson(baseUrl, "/portal/users/11111111-1111-4111-8111-111111111111", admin, {
+      role: "viewer"
+    });
+
+    assert.equal(missing.status, 404);
+
+    const listed = await listUsers(admin);
+    const target = listed.users.find((user) => user.subject === portalUsers.brother.sub);
+
+    for (const patch of [{}, { role: "root" }, { status: "banned" }, { role: 7 }, "not an object"]) {
+      const response = await patchJson(baseUrl, `/portal/users/${target?.id}`, admin, patch);
+
+      assert.equal(response.status, 400, `${JSON.stringify(patch)} must be refused`);
+      assert.deepEqual(await response.json(), { error: "invalid_portal_user_patch" });
+    }
+  });
+
+  it("has no password anywhere in what it returns or accepts", async () => {
+    const listed = await listUsers(idTokenFor("cole"));
+
+    assert.equal(/pass|secret|credential|hash/iu.test(JSON.stringify(listed.users)), false);
+
+    const target = listed.users.find((user) => user.subject === portalUsers.brother.sub);
+    // Constructed the way the deleted credential system would have used it.
+    const response = await patchJson(baseUrl, `/portal/users/${target?.id}`, idTokenFor("cole"), {
+      password: "change-me"
+    });
+
+    assert.equal(response.status, 400, "there is no field here that could carry a credential");
+  });
+
+  it("answers 503 rather than guessing when no account table is wired", async () => {
+    const started = await startTestServer({ resolveIdentity: testIdentityResolver(await seededPortalUsers()) });
+
+    try {
+      const response = await fetch(`${started.baseUrl}/portal/users`, {
+        headers: { authorization: `Bearer ${idTokenFor("cole")}` }
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: "portal_users_unavailable" });
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("the first account on an empty portal", () => {
+  it("makes the first verified arrival admin, and nobody after them", async () => {
+    const users = new InMemoryPortalUsersStore();
+    const started = await startTestServer({
+      resolveIdentity: testIdentityResolver(users),
+      portalUsersStore: users
+    });
+
+    try {
+      const founder = await fetch(`${started.baseUrl}/admin/roles`, {
+        headers: { authorization: `Bearer ${idTokenFor("cole")}` }
+      });
+      const founderBody = (await founder.json()) as { user?: { role?: string } };
+
+      assert.equal(founder.status, 200);
+      assert.equal(founderBody.user?.role, "admin", "an empty portal admits its first arrival as admin");
+
+      const second = await fetch(`${started.baseUrl}/admin/roles`, {
+        headers: { authorization: `Bearer ${idTokenFor("brother")}` }
+      });
+
+      assert.equal(second.status, 403, "the bootstrap happens exactly once");
+      assert.deepEqual(await second.json(), { error: "not_provisioned" });
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("reaching the app port instead of the door", () => {
+  const door = "https://bellwether.example.ts.net";
+  let server: Server;
+  let baseUrl = "";
+  let staticDir = "";
+
+  before(async () => {
+    staticDir = await mkdtemp(join(tmpdir(), "portal-door-"));
+    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>Bellwether</title>");
+    const started = await startPortalServer({
+      staticAssetsDir: staticDir,
+      publicBaseUrl: door
+    });
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await closeTestServer(server);
+    await rm(staticDir, { recursive: true, force: true });
+  });
+
+  it("sends a browser on to the door instead of a shell it could never sign in from", async () => {
+    const response = await fetch(`${baseUrl}/`, { redirect: "manual" });
+
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), `${door}/`);
+  });
+
+  it("keeps the path and query, so a deep link survives the trip", async () => {
+    const response = await fetch(`${baseUrl}/strategies?tab=control&id=7`, { redirect: "manual" });
+
+    assert.equal(response.headers.get("location"), `${door}/strategies?tab=control&id=7`);
+  });
+
+  it("never redirects /healthz — the deploy probe and container healthcheck read it", async () => {
+    const response = await fetch(`${baseUrl}/healthz`, { redirect: "manual" });
 
     assert.equal(response.status, 200);
-    assert.equal(body.user?.id, "portal-admin");
-    assert.equal(body.user?.role, "admin");
-
-    const family = await fetch(`${baseUrl}/family/overview`, {
-      headers: { "x-forwarded-email": "Cole@Example.COM" }
-    });
-
-    assert.equal(family.status, 200, "identity comparison is case-insensitive");
   });
 
-  it("accepts every allowlisted identity as the same shared account", async () => {
-    const response = await fetch(`${baseUrl}/admin/roles`, {
-      headers: { "x-forwarded-email": "family@example.com" }
+  it("still answers 401 on data routes rather than bouncing an XHR", async () => {
+    for (const path of ["/portal/positions", "/family/overview", "/admin/roles"]) {
+      const response = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+
+      assert.equal(response.status, 401, `${path} must answer, not redirect`);
+      assert.deepEqual(await response.json(), { error: "missing_session" });
+    }
+  });
+
+  it("leaves a token-carrying request alone, so the door cannot be made to loop", async () => {
+    // Through the proxy every request carries the forwarded id token. If that
+    // request were redirected back to the proxy, it would bounce forever.
+    const response = await fetch(`${baseUrl}/`, {
+      headers: { authorization: `Bearer ${idTokenFor("cole")}` },
+      redirect: "manual"
     });
-    const body = (await response.json()) as { user?: { id?: string } };
 
     assert.equal(response.status, 200);
-    assert.equal(body.user?.id, "portal-admin", "second identity maps to the SAME shared portal user");
+    assert.match(await response.text(), /Bellwether/u);
   });
 
-  it("fails closed on a missing or forged identity header", async () => {
-    const missing = await fetch(`${baseUrl}/admin/roles`);
-
-    assert.equal(missing.status, 401);
-    assert.deepEqual(await missing.json(), { error: "invalid_session" });
-
-    const forged = await fetch(`${baseUrl}/admin/roles`, {
-      headers: { "x-forwarded-email": "intruder@example.com" }
+  it("serves the shell normally when the request already arrived at the door", async () => {
+    // fetch refuses to set Host, and Host is the whole question here.
+    const status = await new Promise<number>((resolve, reject) => {
+      const address = server.address() as AddressInfo;
+      const request = httpRequest(
+        { host: "127.0.0.1", port: address.port, path: "/", headers: { host: "bellwether.example.ts.net" } },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        }
+      );
+      request.on("error", reject);
+      request.end();
     });
 
-    assert.equal(forged.status, 401);
+    assert.equal(status, 200, "a request that already came through the door must not be bounced back to it");
   });
 
-  it("ignores Bearer tokens entirely in proxy mode", async () => {
-    // A token in the provider's deterministic format, with no proxy header:
-    // in proxy mode requireRole must never consult the Bearer path.
-    const response = await fetch(`${baseUrl}/admin/roles`, {
-      headers: { authorization: "Bearer in-memory-session:user-cole" }
-    });
+  it("does not redirect when no door address is configured", async () => {
+    const started = await startPortalServer({ staticAssetsDir: staticDir });
 
-    assert.equal(response.status, 401);
+    try {
+      const response = await fetch(`${started.baseUrl}/`, { redirect: "manual" });
+
+      assert.equal(response.status, 200);
+    } finally {
+      await closeTestServer(started.server);
+    }
+  });
+});
+
+describe("the deleted in-app credential system", () => {
+  let server: Server;
+  let baseUrl = "";
+
+  before(async () => {
+    const started = await startPortalServer();
+    server = started.server;
+    baseUrl = started.baseUrl;
   });
 
-  it("makes the password login route structurally unreachable", async () => {
-    const response = await fetch(`${baseUrl}/auth/session`, {
+  after(async () => {
+    await closeTestServer(server);
+  });
+
+  async function postCredentials(credentials: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/auth/session`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username: "cole", password: "not-a-real-password" })
+      body: JSON.stringify(credentials)
+    });
+  }
+
+  it("404s POST /auth/session exactly like a route that never existed", async () => {
+    const login = await postCredentials({ username: "admin", password: "change-me" });
+    const neverExisted = await fetch(`${baseUrl}/auth/there-was-never-a-route-here`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "change-me" })
     });
 
-    assert.equal(response.status, 404);
+    assert.equal(login.status, 404);
+    assert.deepEqual(await login.json(), { error: "not_found" });
+    assert.equal(neverExisted.status, login.status);
+  });
+
+  it("answers identically whether or not the named account ever existed — no oracle", async () => {
+    // admin/change-me was the seeded default; cole is a real Pocket ID user;
+    // the last two never existed. All four must be indistinguishable.
+    const answers = await Promise.all(
+      [
+        { username: "admin", password: "change-me" },
+        { username: "cole", password: "not-a-real-password" },
+        { username: "nobody-at-all", password: "" },
+        { not: "even credentials" }
+      ].map(async (credentials) => {
+        const response = await postCredentials(credentials);
+        return { status: response.status, body: await response.text() };
+      })
+    );
+
+    for (const answer of answers) {
+      assert.deepEqual(answer, answers[0]);
+    }
+  });
+
+  it("treats the login path exactly like a path that was never registered", async () => {
+    // With the SPA served, an unknown GET falls through to the app shell — so
+    // the property to hold is indistinguishability, on every method, in the
+    // configuration the deployment actually runs.
+    const staticDir = await mkdtemp(join(tmpdir(), "portal-shell-"));
+    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>Bellwether</title>");
+    const started = await startPortalServer({ staticAssetsDir: staticDir });
+
+    try {
+      for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]) {
+        const [login, neverExisted] = await Promise.all(
+          ["/auth/session", "/auth/was-never-a-route"].map(async (path) => {
+            const response = await fetch(`${started.baseUrl}${path}`, { method });
+            return { status: response.status, body: await response.text() };
+          })
+        );
+
+        assert.deepEqual(login, neverExisted, `${method} /auth/session is distinguishable from a dead path`);
+      }
+    } finally {
+      await closeTestServer(started.server);
+      await rm(staticDir, { recursive: true, force: true });
+    }
+  });
+
+  it("mints no session token — the retired token formats authenticate nothing", async () => {
+    for (const token of ["in-memory-session:portal-admin", "in-memory-session:user-cole", "trusted-proxy"]) {
+      const response = await fetch(`${baseUrl}/admin/roles`, { headers: { authorization: `Bearer ${token}` } });
+
+      assert.equal(response.status, 401);
+      assert.deepEqual(await response.json(), { error: "invalid_session" });
+    }
+  });
+
+  it("ignores the retired ServerOptions wiring — the old lanes are gone, not re-pluggable", async () => {
+    const seededAdmin = { id: "portal-admin", username: "admin", displayName: "Administrator", role: "admin" };
+    // Exactly how the deleted code was wired, forced past the type system.
+    const started = await startTestServer({
+      identityProvider: {
+        authenticate: async () => ({ token: "in-memory-session:portal-admin", user: seededAdmin }),
+        identifySession: async () => seededAdmin
+      },
+      trustedProxyAuth: {
+        headerName: "x-forwarded-email",
+        expectedIdentities: [],
+        allowAnyIdentity: true,
+        user: seededAdmin
+      }
+    } as unknown as ServerOptions);
+
+    try {
+      const login = await fetch(`${started.baseUrl}/auth/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: "admin", password: "change-me" })
+      });
+      const bearer = await fetch(`${started.baseUrl}/admin/roles`, {
+        headers: { authorization: "Bearer in-memory-session:portal-admin" }
+      });
+      const header = await fetch(`${started.baseUrl}/admin/roles`, {
+        headers: { "x-forwarded-email": "anyone@anywhere.test" }
+      });
+
+      assert.equal(login.status, 404);
+      assert.equal(bearer.status, 503, "no identity source is configured, so nothing is admitted");
+      assert.equal(header.status, 503);
+    } finally {
+      await closeTestServer(started.server);
+    }
   });
 });
 
@@ -585,8 +1011,7 @@ describe("viewer portal role audit", () => {
       qualitativeEvidence: { links: [], quotes: [], signals: [] }
     });
 
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       broker: new StubBrokerAdapter(),
       decisionLogStore,
       runtimeControl,
@@ -599,7 +1024,7 @@ describe("viewer portal role audit", () => {
     });
     server = started.server;
     baseUrl = started.baseUrl;
-    viewerToken = await authenticate(baseUrl, "family");
+    viewerToken = idTokenFor("family");
   });
 
   after(async () => {
@@ -765,8 +1190,7 @@ describe("portal read API", () => {
       }
     });
 
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       broker: new StubBrokerAdapter(),
       decisionLogStore,
       strategyStore
@@ -780,7 +1204,7 @@ describe("portal read API", () => {
   });
 
   it("returns broker-backed account P&L and positions to viewer-or-higher roles", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/portal/positions`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -795,7 +1219,7 @@ describe("portal read API", () => {
   });
 
   it("returns per-strategy paper P&L and equity summaries from existing snapshots", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/portal/positions`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -827,7 +1251,7 @@ describe("portal read API", () => {
   });
 
   it("returns bounded newest-first glass-box decisions to viewer-or-higher roles", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/portal/decisions?limit=1`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -848,10 +1272,10 @@ describe("portal read API", () => {
   });
 
   it("reports missing runtime dependencies instead of returning fake portal data", async () => {
-    const started = await startTestServer({ identityProvider: testIdentityProvider() });
+    const started = await startPortalServer();
 
     try {
-      const token = await authenticate(started.baseUrl, "family");
+      const token = idTokenFor("family");
       const positionsResponse = await fetch(`${started.baseUrl}/portal/positions`, {
         headers: { authorization: `Bearer ${token}` }
       });
@@ -894,10 +1318,10 @@ describe("portal proposal inbox API", () => {
       qualitativeEvidence: { links: [], quotes: [], signals: [] },
       createdAt: "2026-06-17T13:00:00.000Z"
     });
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore });
+    const started = await startPortalServer({ proposalsStore });
 
     try {
-      const viewerToken = await authenticate(started.baseUrl, "family");
+      const viewerToken = idTokenFor("family");
       const response = await fetch(`${started.baseUrl}/portal/proposals?limit=1`, {
         headers: { authorization: `Bearer ${viewerToken}` }
       });
@@ -923,10 +1347,10 @@ describe("portal proposal inbox API", () => {
       quantRationale: "Quant rationale",
       qualitativeEvidence: { links: [], quotes: [], signals: [] }
     });
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore: new RecordingStrategyStore() });
+    const started = await startPortalServer({ proposalsStore, strategyStore: new RecordingStrategyStore() });
 
     try {
-      const viewerToken = await authenticate(started.baseUrl, "family");
+      const viewerToken = idTokenFor("family");
       const response = await postJson(started.baseUrl, "/portal/proposals/proposal-viewer-blocked/review", viewerToken, {
         decision: "dismiss"
       });
@@ -953,10 +1377,10 @@ describe("portal proposal inbox API", () => {
       quantRationale: "Momentum breadth improved while volatility cooled.",
       qualitativeEvidence: { links: [], quotes: [], signals: [{ label: "Breadth", value: "improving" }] }
     });
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore });
+    const started = await startPortalServer({ proposalsStore, strategyStore });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const adminToken = idTokenFor("cole");
       const response = await postJson(started.baseUrl, "/portal/proposals/proposal-accept/review", adminToken, {
         decision: "accept"
       });
@@ -991,10 +1415,10 @@ describe("portal proposal inbox API", () => {
       quantRationale: "Weak rationale",
       qualitativeEvidence: { links: [], quotes: [], signals: [] }
     });
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore });
+    const started = await startPortalServer({ proposalsStore, strategyStore });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const adminToken = idTokenFor("cole");
       const response = await postJson(started.baseUrl, "/portal/proposals/proposal-dismiss/review", adminToken, {
         decision: "dismiss"
       });
@@ -1012,10 +1436,10 @@ describe("portal proposal inbox API", () => {
 
   it("maps unknown proposal ids and bad review bodies", async () => {
     const proposalsStore = new InMemoryStrategyProposalsStore();
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), proposalsStore, strategyStore: new RecordingStrategyStore() });
+    const started = await startPortalServer({ proposalsStore, strategyStore: new RecordingStrategyStore() });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const adminToken = idTokenFor("cole");
       const unknownResponse = await postJson(started.baseUrl, "/portal/proposals/unknown-proposal/review", adminToken, {
         decision: "accept"
       });
@@ -1043,12 +1467,12 @@ describe("portal strategy registry API", () => {
 
   before(async () => {
     strategyStore = new RecordingStrategyStore();
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), strategyStore });
+    const started = await startPortalServer({ strategyStore });
     server = started.server;
     baseUrl = started.baseUrl;
-    adminToken = await authenticate(baseUrl, "cole");
-    managerToken = await authenticate(baseUrl, "brother");
-    viewerToken = await authenticate(baseUrl, "family");
+    adminToken = idTokenFor("cole");
+    managerToken = idTokenFor("brother");
+    viewerToken = idTokenFor("family");
   });
 
   after(async () => {
@@ -1203,10 +1627,10 @@ describe("portal strategy registry API", () => {
     const badCreateResponse = await postJson(baseUrl, "/portal/strategies", adminToken, { name: "Bad params", parameters: {} });
     const badUpdateResponse = await patchJson(baseUrl, `/portal/strategies/${active.id}`, adminToken, { status: "active" });
     const badReasonResponse = await postJson(baseUrl, `/portal/strategies/${active.id}/pause`, adminToken, { reason: 42 });
-    const missingStarted = await startTestServer({ identityProvider: testIdentityProvider() });
+    const missingStarted = await startPortalServer();
 
     try {
-      const token = await authenticate(missingStarted.baseUrl, "cole");
+      const token = idTokenFor("cole");
       const missingResponse = await fetch(`${missingStarted.baseUrl}/portal/strategies`, {
         headers: { authorization: `Bearer ${token}` }
       });
@@ -1251,12 +1675,12 @@ describe("portal roster API", () => {
         updatedAt: "2026-06-17T10:00:00.000Z"
       }
     ]);
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), sourcesStore, env: {} });
+    const started = await startPortalServer({ sourcesStore, env: {} });
     server = started.server;
     baseUrl = started.baseUrl;
-    adminToken = await authenticate(baseUrl, "cole");
-    managerToken = await authenticate(baseUrl, "brother");
-    viewerToken = await authenticate(baseUrl, "family");
+    adminToken = idTokenFor("cole");
+    managerToken = idTokenFor("brother");
+    viewerToken = idTokenFor("family");
   });
 
   after(async () => {
@@ -1354,14 +1778,13 @@ describe("portal roster API", () => {
       quality_rating: 3
     });
     const enabledStore = new RecordingSourcesStore();
-    const enabledStarted = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const enabledStarted = await startPortalServer({
       sourcesStore: enabledStore,
       env: { BELLWETHER_FEATURE_X_HANDLES: "true" }
     });
 
     try {
-      const enabledToken = await authenticate(enabledStarted.baseUrl, "cole");
+      const enabledToken = idTokenFor("cole");
       const enabledResponse = await postJson(enabledStarted.baseUrl, "/portal/roster", enabledToken, {
         source_key: "x-handle-enabled",
         name: "Enabled X Handle",
@@ -1412,10 +1835,10 @@ describe("portal roster API", () => {
       enabled: false
     });
     const unknownDeleteResponse = await deleteJson(baseUrl, "/portal/roster/99999999-9999-4999-8999-999999999999", adminToken);
-    const missingStarted = await startTestServer({ identityProvider: testIdentityProvider() });
+    const missingStarted = await startPortalServer();
 
     try {
-      const token = await authenticate(missingStarted.baseUrl, "cole");
+      const token = idTokenFor("cole");
       const missingResponse = await fetch(`${missingStarted.baseUrl}/portal/roster`, {
         headers: { authorization: `Bearer ${token}` }
       });
@@ -1454,8 +1877,7 @@ describe("portal strategy chat API", () => {
     ]);
     const strategy = await strategyStore.createStrategy({ name: "Chat target", description: "Momentum mandate", parameters: strategyParameters() });
     const originalStrategy = await strategyStore.getStrategy(strategy.id);
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       strategyStore,
       strategyChatStore: chatStore,
       strategyChatModel: model,
@@ -1463,8 +1885,8 @@ describe("portal strategy chat API", () => {
     });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
-      const viewerToken = await authenticate(started.baseUrl, "family");
+      const adminToken = idTokenFor("cole");
+      const viewerToken = idTokenFor("family");
       const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
         content: "Formalize this mandate into a tighter max-open-positions proposal.",
         mode: "formalize"
@@ -1514,15 +1936,14 @@ describe("portal strategy chat API", () => {
       }
     ]);
     const strategy = await strategyStore.createStrategy({ name: "Brainstorm target", parameters: strategyParameters() });
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       strategyStore,
       strategyChatStore: chatStore,
       strategyChatModel: model
     });
 
     try {
-      const managerToken = await authenticate(started.baseUrl, "brother");
+      const managerToken = idTokenFor("brother");
       const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, managerToken, {
         content: "Brainstorm candidate strategies for volatile markets.",
         mode: "brainstorm"
@@ -1546,16 +1967,15 @@ describe("portal strategy chat API", () => {
     const chatStore = new InMemoryStrategyChatStore();
     const model = new QueueReasoningModel([]);
     const strategy = await strategyStore.createStrategy({ name: "Gated chat target", parameters: strategyParameters() });
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       strategyStore,
       strategyChatStore: chatStore,
       strategyChatModel: model
     });
 
     try {
-      const viewerToken = await authenticate(started.baseUrl, "family");
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const viewerToken = idTokenFor("family");
+      const adminToken = idTokenFor("cole");
       const viewerPost = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, viewerToken, { content: "try write" });
       const unauthenticatedGet = await fetch(`${started.baseUrl}/portal/strategies/${strategy.id}/chat`);
       const unknownResponse = await postJson(
@@ -1583,15 +2003,14 @@ describe("portal strategy chat API", () => {
     const chatStore = new InMemoryStrategyChatStore();
     const model = new QueueReasoningModel([new Error("timeout")]);
     const strategy = await strategyStore.createStrategy({ name: "Fallback target", parameters: strategyParameters() });
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       strategyStore,
       strategyChatStore: chatStore,
       strategyChatModel: model
     });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const adminToken = idTokenFor("cole");
       const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
         content: "Please formalize despite the outage."
       });
@@ -1612,14 +2031,13 @@ describe("portal strategy chat API", () => {
     const strategyStore = new RecordingStrategyStore();
     const chatStore = new InMemoryStrategyChatStore();
     const strategy = await strategyStore.createStrategy({ name: "No model target", parameters: strategyParameters() });
-    const started = await startTestServer({
-      identityProvider: testIdentityProvider(),
+    const started = await startPortalServer({
       strategyStore,
       strategyChatStore: chatStore
     });
 
     try {
-      const adminToken = await authenticate(started.baseUrl, "cole");
+      const adminToken = idTokenFor("cole");
       const response = await postJson(started.baseUrl, `/portal/strategies/${strategy.id}/chat`, adminToken, {
         content: "Try the chat turn without a model."
       });
@@ -1640,7 +2058,7 @@ describe("portal runtime control API", () => {
 
   before(async () => {
     runtimeControl = new InMemoryRuntimeControl();
-    const started = await startTestServer({ identityProvider: testIdentityProvider(), runtimeControl });
+    const started = await startPortalServer({ runtimeControl });
     server = started.server;
     baseUrl = started.baseUrl;
   });
@@ -1650,7 +2068,7 @@ describe("portal runtime control API", () => {
   });
 
   it("returns runtime status to viewer-or-higher roles", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const response = await fetch(`${baseUrl}/portal/runtime`, {
       headers: { authorization: `Bearer ${token}` }
     });
@@ -1661,7 +2079,7 @@ describe("portal runtime control API", () => {
   });
 
   it("allows admins to start the continuous runtime idempotently", async () => {
-    const token = await authenticate(baseUrl, "cole");
+    const token = idTokenFor("cole");
     const response = await fetch(`${baseUrl}/portal/runtime/start`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` }
@@ -1683,7 +2101,7 @@ describe("portal runtime control API", () => {
   });
 
   it("allows managers to stop the runtime through the same admin boundary", async () => {
-    const token = await authenticate(baseUrl, "brother");
+    const token = idTokenFor("brother");
     const response = await fetch(`${baseUrl}/portal/runtime/stop`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` }
@@ -1697,13 +2115,13 @@ describe("portal runtime control API", () => {
   });
 
   it("allows managers to start and admins to stop through adminBoundaryRoles", async () => {
-    const managerToken = await authenticate(baseUrl, "brother");
+    const managerToken = idTokenFor("brother");
     const startResponse = await fetch(`${baseUrl}/portal/runtime/start`, {
       method: "POST",
       headers: { authorization: `Bearer ${managerToken}` }
     });
     const startBody = (await startResponse.json()) as AgentRuntimeStatus;
-    const adminToken = await authenticate(baseUrl, "cole");
+    const adminToken = idTokenFor("cole");
     const stopResponse = await fetch(`${baseUrl}/portal/runtime/stop`, {
       method: "POST",
       headers: { authorization: `Bearer ${adminToken}` }
@@ -1720,7 +2138,7 @@ describe("portal runtime control API", () => {
   });
 
   it("blocks viewers from start and stop controls", async () => {
-    const token = await authenticate(baseUrl, "family");
+    const token = idTokenFor("family");
     const startResponse = await fetch(`${baseUrl}/portal/runtime/start`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` }

@@ -1,4 +1,4 @@
-import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 
 export type AuthenticatedUser = {
   id: string;
@@ -7,60 +7,26 @@ export type AuthenticatedUser = {
   role: "admin" | "manager" | "viewer";
 };
 
-type SessionResponse = {
-  token: string;
-  user: AuthenticatedUser;
-};
-
 type AuthState = {
-  username: string;
-  password: string;
-  token: string | null;
   user: AuthenticatedUser | null;
-  status: "idle" | "loading" | "succeeded" | "failed";
-  error: string | null;
+  status: "checking" | "signed-in" | "signed-out";
+  detail: string | null;
 };
 
 const initialState: AuthState = {
-  username: "admin",
-  password: "",
-  token: null,
   user: null,
-  status: "idle",
-  error: null
+  status: "checking",
+  detail: null
 };
 
-export const createSession = createAsyncThunk<SessionResponse, void, { state: { auth: AuthState }; rejectValue: string }>(
-  "auth/createSession",
-  async (_arg, { getState, rejectWithValue }) => {
-    const { username, password } = getState().auth;
-    const response = await fetch("/auth/session", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username, password })
-    });
-
-    if (!response.ok) {
-      return rejectWithValue(`session rejected: ${response.status}`);
-    }
-
-    return (await response.json()) as SessionResponse;
-  }
-);
-
-/** Sentinel token for reverse-proxy identity mode: the server ignores Bearer
- *  tokens entirely in that mode, so this value only satisfies client-side
- *  "has a session" gates; it never authenticates anything. */
-export const TRUSTED_PROXY_TOKEN = "trusted-proxy";
-
-/** RP-initiated logout URL for proxy mode (infra POCKETID-STACK-PATTERN.md
- *  §Sign-out). oauth2-proxy clears its own cookie, substitutes the session's
- *  {id_token} into the redirect, and hands the browser to Pocket ID's
- *  end-session endpoint — ending the IdP session too — which bounces back to
- *  the app root, where the door presents the passkey prompt (the logged-out
- *  state on an always-gated app). A plain /oauth2/sign_out clears only the
- *  proxy cookie and the still-live IdP session re-authenticates instantly.
- *  The IdP is `id.` on the app's own tailnet suffix, by house convention. */
+/** RP-initiated logout (infra POCKETID-STACK-PATTERN.md §Sign-out).
+ *  oauth2-proxy clears its own cookie, substitutes the session's {id_token}
+ *  into the redirect, and hands the browser to Pocket ID's end-session
+ *  endpoint — ending the IdP session too — which bounces back to the app root,
+ *  where the door presents the passkey prompt. A plain /oauth2/sign_out clears
+ *  only the proxy cookie and the still-live IdP session re-authenticates
+ *  instantly. The IdP is `id.` on the app's own tailnet suffix, by house
+ *  convention. */
 export function proxySignOutUrl(): string {
   const suffix = window.location.hostname.split(".").slice(1).join(".");
   const postLogout = encodeURIComponent(`${window.location.origin}/`);
@@ -68,69 +34,47 @@ export function proxySignOutUrl(): string {
   return `/oauth2/sign_out?rd=${encodeURIComponent(endSession)}`;
 }
 
-/** Ambient-session probe. Behind the OIDC proxy the request arrives already
- *  authenticated and this resolves with the mapped portal user — the login
- *  screen never renders. In password mode it 401s and nothing changes. */
-export const bootstrapSession = createAsyncThunk<SessionResponse, void, { rejectValue: string }>(
+/** The portal's only sign-in: ask the server who this browser already is.
+ *  Reached through oauth2-proxy the request arrives carrying a Pocket ID token
+ *  the server verifies, and this resolves with the portal user. Reached any
+ *  other way it 401s and the app stays signed out — there is no form to fall
+ *  back to, because the app holds no credential of its own. */
+export const bootstrapSession = createAsyncThunk<AuthenticatedUser, void, { rejectValue: string }>(
   "auth/bootstrapSession",
   async (_arg, { rejectWithValue }) => {
     const response = await fetch("/family/overview");
 
     if (!response.ok) {
-      return rejectWithValue(`no ambient session: ${response.status}`);
+      return rejectWithValue(`not signed in (${response.status})`);
     }
 
     const body = (await response.json()) as { ok: boolean; user: AuthenticatedUser };
 
-    return { token: TRUSTED_PROXY_TOKEN, user: body.user };
+    return body.user;
   }
 );
 
 const authSlice = createSlice({
   name: "auth",
   initialState,
-  reducers: {
-    setUsername(state, action: PayloadAction<string>) {
-      state.username = action.payload;
-    },
-    setPassword(state, action: PayloadAction<string>) {
-      state.password = action.payload;
-    },
-    signOut(state) {
-      state.token = null;
-      state.user = null;
-      state.status = "idle";
-      state.error = null;
-    }
-  },
+  reducers: {},
   extraReducers: (builder) => {
     builder
-      .addCase(createSession.pending, (state) => {
-        state.status = "loading";
-        state.error = null;
+      .addCase(bootstrapSession.pending, (state) => {
+        state.status = "checking";
+        state.detail = null;
       })
-      .addCase(createSession.fulfilled, (state, action) => {
-        state.status = "succeeded";
-        state.token = action.payload.token;
-        state.user = action.payload.user;
-        state.password = "";
-      })
-      .addCase(createSession.rejected, (state, action) => {
-        state.status = "failed";
-        state.token = null;
-        state.user = null;
-        state.error = action.payload ?? action.error.message ?? "session failed";
-      })
-      // No pending/rejected cases on purpose: a failed probe must leave the
-      // password login flow byte-identical to today.
       .addCase(bootstrapSession.fulfilled, (state, action) => {
-        state.status = "succeeded";
-        state.token = action.payload.token;
-        state.user = action.payload.user;
-        state.password = "";
+        state.status = "signed-in";
+        state.user = action.payload;
+        state.detail = null;
+      })
+      .addCase(bootstrapSession.rejected, (state, action) => {
+        state.status = "signed-out";
+        state.user = null;
+        state.detail = action.payload ?? action.error.message ?? "not signed in";
       });
   }
 });
 
-export const { setUsername, setPassword, signOut } = authSlice.actions;
 export default authSlice.reducer;

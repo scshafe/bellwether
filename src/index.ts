@@ -6,7 +6,8 @@ import { createBrokerAdapter, ensureBrokerFlipLogSchema, paperFlipState } from "
 import { ensureAgentDecisionLogSchema, PostgresAgentDecisionLogStore } from "./agent-team.js";
 import { createPool } from "./db.js";
 import { readDatabaseUrlConfig, readServerEndpointsConfig } from "./placement.js";
-import { createIdentityProvider, readTrustedProxyAuthConfig } from "./portal-identity.js";
+import { createPortalIdentityResolver, readPortalIdentityConfig } from "./portal-identity.js";
+import { ensurePortalUsersSchema, PostgresPortalUsersStore } from "./portal-users.js";
 import { ensureQualitativeItemsSchema, ensureSourcesSchema, PostgresSourcesStore } from "./qualitative.js";
 import { ensureAgentRuntimeControlSchema, PostgresAgentRuntimeControl } from "./runtime-control.js";
 import { SecretsBackedBrokerCredentialVault } from "./secrets.js";
@@ -17,6 +18,9 @@ import { ensureStrategyChatSchema, PostgresStrategyChatStore } from "./strategy-
 import { ensureStrategyProposalsSchema, PostgresStrategyProposalsStore } from "./strategy-proposals.js";
 
 const endpoints = readServerEndpointsConfig();
+// Read before anything else opens a socket: a portal with no verifiable
+// identity source has no way to admit a human, so it must not boot at all.
+const identityConfig = readPortalIdentityConfig(process.env);
 const { databaseUrl } = readDatabaseUrlConfig();
 const pool = createPool(databaseUrl);
 
@@ -28,12 +32,14 @@ await ensureStrategyProposalsSchema(pool);
 await ensureBrokerFlipLogSchema(pool);
 await ensureSourcesSchema(pool);
 await ensureQualitativeItemsSchema(pool);
+await ensurePortalUsersSchema(pool);
 
+const portalUsersStore = new PostgresPortalUsersStore(pool);
 const brokerCredentialVault = new SecretsBackedBrokerCredentialVault(await createAlpacaPaperSecretsStore());
 const server = createServer({
   databaseUrl,
-  identityProvider: createIdentityProvider(process.env),
-  trustedProxyAuth: readTrustedProxyAuthConfig(process.env) ?? undefined,
+  resolveIdentity: createPortalIdentityResolver(identityConfig, portalUsersStore),
+  portalUsersStore,
   broker: await createBrokerAdapter(brokerCredentialVault, ALPACA_PAPER_BROKER_ACCOUNT_ID, paperFlipState()),
   decisionLogStore: new PostgresAgentDecisionLogStore(pool),
   runtimeControl: new PostgresAgentRuntimeControl(pool),
@@ -42,7 +48,8 @@ const server = createServer({
   strategyChatStore: new PostgresStrategyChatStore(pool),
   strategyChatModel: await createOptionalStrategyChatModel(),
   sourcesStore: new PostgresSourcesStore(pool),
-  staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname
+  staticAssetsDir: process.env.PORTAL_STATIC_DIR ?? new URL("../client/dist", import.meta.url).pathname,
+  publicBaseUrl: endpoints.publicBaseUrl
 });
 
 process.on("SIGINT", () => {
