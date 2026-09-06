@@ -17,6 +17,9 @@ verb="${1:-}"
 shift || true
 case "$verb" in
   install)
+    # The Conductor links node_modules to the primary checkout's so installs
+    # persist across runs; make that target exist before installing into it.
+    if [ -L node_modules ] && [ ! -e node_modules ]; then mkdir -p "$(readlink node_modules)"; fi
     stamp_file=node_modules/.conductor-lock-sha256
     stamp="$(sha256sum package-lock.json | cut -c1-64)"
     if [ -d node_modules ] && [ "$(cat "$stamp_file" 2>/dev/null || true)" = "$stamp" ]; then
