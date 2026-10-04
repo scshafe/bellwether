@@ -1,6 +1,6 @@
 name: CI
 
-# BASE-04. Added by scshafe-dev v0.2.0 (the service kind). It runs
+# BASE-04. Added by scshafe-dev (the service kind). It runs
 # dev.toml [verify] command (BASE-06): keep the two equal.
 #
 # SERVICE-02: this workflow verifies and never deploys. The service reaches
