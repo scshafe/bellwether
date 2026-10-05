@@ -1,5 +1,9 @@
 # bellwether Agent Contract
 
+> Deploys are paused (2026-10-05): mc-autodeploy retired; a merge to main does not deploy.
+> This project moves to the runner lane (infra docs/platform/agent-deploy.md phase 6);
+> until then a deploy is an owner step.
+
 Bellwether (package name `agent-trading-platform`) is a **paper-money-only**
 agent trading platform: a TypeScript HTTP server with a React/Vite family
 portal (`src/server.ts`, `client/`), a Postgres-coordinated worker that runs the
