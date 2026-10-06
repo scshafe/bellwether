@@ -134,7 +134,7 @@ only way back would be hand-editing the table.
 
 | Env var | Meaning |
 | --- | --- |
-| `PORTAL_OIDC_ISSUER` | Pocket ID base URL; required, https (`https://id.colobus-stargazer.ts.net`) |
+| `PORTAL_OIDC_ISSUER` | Pocket ID base URL; required, https (`https://id.<tailnet>.ts.net`) |
 | `PORTAL_OIDC_AUDIENCE` | the OIDC client id tokens must be minted for; required — the same client id the door uses |
 | `PORTAL_OIDC_JWKS_URL` | optional; pins the key set and skips discovery |
 | `PORTAL_OIDC_TOKEN_HEADER` | optional; default `authorization` (Bearer) |
@@ -143,7 +143,7 @@ only way back would be hand-editing the table.
 
 The door is `oauth2-proxy` in infra's `stacks/bellwether` — same netns as the
 app, reached through the tailnet sidecar's `serve` at
-`https://bellwether.colobus-stargazer.ts.net`. It must **forward the token**,
+`https://bellwether.<tailnet>.ts.net`. It must **forward the token**,
 or the app answers 401 to everything, since it has no other way to learn who
 you are:
 
@@ -162,9 +162,6 @@ signed-out shell that no amount of reloading fixes.
 
 `OAUTH2_PROXY_SKIP_AUTH_ROUTES: "GET=^/healthz$"` stays: `/healthz` is
 tenant-less liveness with no data behind it, and the deploy probe reads it.
-
-`deploy/docker/` in this repo is a superseded reference with no door of its
-own; do not deploy from it.
 
 Sign-out is RP-initiated: the SPA sends the browser to `/oauth2/sign_out` with
 a redirect to Pocket ID's `end-session` endpoint, so the IdP session ends too.
