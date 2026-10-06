@@ -2,27 +2,35 @@
 # data, never as shell, and rejects an unknown key; `dev check` (DEPLOY-03)
 # checks the same schema. Secrets are named here and never valued: the owner's
 # provisioning places them on the host. Infra's stacks/bellwether/host.conf
-# grants what this file cannot (host paths, loopback ports, groups).
+# grants what this file cannot (host paths, loopback ports, groups: none).
 schema = 1
 
 [deploy]
-image = "bellwether"                  # the image built from this repository's Dockerfile
-pin = "BELLWETHER_IMAGE"                      # the .env variable stack deploy writes (name:tag)
+image = "bellwether"                 # the image built from this repository's Dockerfile
+pin = "BELLWETHER_IMAGE"             # the .env variable stack deploy writes (name:tag)
 pin_style = "ref"
 dockerfile = "Dockerfile"
-containers = ["bellwether"]           # all must be ready on the candidate
-health = "/healthz"                  # probed through the tailnet name
-ready_attempts = 20
-rollback_services = ["bellwether"]
+# ONE image drives TWO containers, the portal server and the worker (the
+# trading engine, no HTTP): both must be ready on the candidate, or the worker
+# could crash-loop while the witness read green off the server.
+containers = ["bellwether", "bellwether-worker"]
+health = "/healthz"                  # probed through the door at the tailnet name
+ready_attempts = 30
+rollback_services = ["server", "worker"]   # never the sidecar (the identity), the door or the database
 
 [check]
-required_health_services = ["bellwether"]
+required_health_services = ["db", "server", "worker"]
 
 [backup]
 tailscale = true                     # the node identity (always, with a sidecar)
-paths = []                           # app data under state/, e.g. ["state/data"]
+# .env: the door's client and cookie secrets and the database password.
+# state/secrets: the Alpaca paper and OpenAI OAuth credential files.
+paths = [".env", "state/secrets"]
+# A nightly pg_dump of the paper-trading database. The data directory itself is
+# never file-copied: a live data directory copied file-level is torn pages.
+pg = { container = "bellwether-db", user = "atp", db = "agent_trading_platform" }
 
 [env]
-required = ["TS_AUTHKEY", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "ID_TAILNET_IP"]
+required = ["TS_AUTHKEY", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "ID_TAILNET_IP", "POSTGRES_PASSWORD"]
 generated = ["OAUTH2_PROXY_COOKIE_SECRET"]
 owner = []

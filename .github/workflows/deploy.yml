@@ -44,6 +44,11 @@ jobs:
           ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       # scshafe-dev:begin toolchain (project-owned: the setup steps the [verify] command needs; keep equal to ci.yml's)
+      # actions/setup-node v7.0.0. Node 22: the Dockerfile's node:22-alpine
+      # (package.json engines: >=22).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
       # scshafe-dev:end toolchain
       - name: Verify (dev.toml [verify] command)
         run: |

@@ -1,22 +1,37 @@
-# Skeleton from scshafe-dev (dev.toml [deploy], DEPLOY-03), with the door:
-# tailnet -> oauth2-proxy (Pocket ID) -> the app. The host's tools/stack
-# validates it against an allowlist before anything runs: no privileges, no
-# host namespaces, binds only under ./state, no published ports but the
-# door's, images either built here (through the pin) or pinned by digest.
-# `dev check` runs the same validator (DEPLOY-04) and lists what it can see
-# (DEPLOY-05).
+# Bellwether on the tailnet as its own machine, `bellwether`, served at
+# https://bellwether.<tailnet>/ (tailnet only; never Funnel). PAPER money only:
+# src/broker.ts hardcodes the Alpaca paper API, and the live flip refuses
+# without a feature env that is deliberately not set here. The trading engine
+# is a database flag: the worker runs but idles until agent_runtime_status is
+# enabled from the portal.
 #
-# Topology (voice-journey's; the validator requires it with the door, V-11):
+# An app-owned stack (scshafe infra docs/platform/agent-deploy.md): a merge to
+# main deploys it through the runner lane; nobody runs `docker compose` on it by
+# hand. The host's tools/stack validates this file against an allowlist before
+# anything runs: no privileges, no host namespaces, binds only under ./state,
+# images either built here (through the pin) or pinned by digest. `dev check`
+# runs the same validator (DEPLOY-04).
+#
+# Auth: oauth2-proxy -> Pocket ID (https://id.<tailnet>), PKCE S256. The door
+# forwards the id token (Authorization: Bearer) and no identity headers; the
+# app verifies the token's signature against Pocket ID's JWKS (AUTH.md), so a
+# forged header is worth nothing.
+#
+# Topology (exact addresses are authority; the door layout, V-11):
 #   door      internal /29   ts-bellwether .2 -> oauth2-proxy .3:4180 (serve.json)
-#   upstream  internal /29   oauth2-proxy .10 -> bellwether .11:8080
-#   egress    bridge         the sidecar (control, DERP, ACME), the door (Pocket ID)
-# Nothing but the sidecar sits on its namespace: under userspace tailscale a
-# tailnet peer reaches every port listening there, so an app there would be
-# reachable around the door. The app trusts the proxy's identity headers, so
-# only the door may reach it.
-# TODO: give the stack its own subnets, 10.253.<n>.0/29 and 10.253.<n>.8/29
-# with n unique on the host (voice-journey has 86), and change every address
-# below with them: the placeholder n = 0 collides with every other skeleton.
+#   upstream  internal /29   oauth2-proxy .10 -> server .11:3000
+#   db        internal /29   server, worker -> db:5432 (scram-sha-256, password)
+#   egress    bridge         the sidecar (control, DERP, ACME), the door
+#                            (Pocket ID), server and worker (Alpaca paper,
+#                            OpenAI, the id node's JWKS)
+# Nothing but the sidecar sits on its namespace (under userspace tailscale a
+# tailnet peer reaches every port listening there), the database is on its own
+# internal network, and no port is published on the host.
+#
+# State (./state, on the host /srv/stacks/bellwether/state):
+#   tailscale  the node identity (the sidecar only)
+#   db         the Postgres 16 data directory, uid 70 (the image's postgres)
+#   secrets    alpaca-paper.env and openai-oauth.json, cole 0600, read-only
 name: bellwether
 
 networks:
@@ -25,95 +40,258 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 10.253.0.0/29
+        - subnet: 10.253.89.0/29
   upstream:
     driver: bridge
     internal: true
     ipam:
       config:
-        - subnet: 10.253.0.8/29
+        - subnet: 10.253.89.8/29
+  db:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.253.89.16/29
   egress:
     driver: bridge
 
 services:
+  # --- the door ------------------------------------------------------------------
   ts-bellwether:
-    # TODO: pin the digest: docker buildx imagetools inspect tailscale/tailscale:<tag>
-    image: tailscale/tailscale@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # tailscale/tailscale:v1.102.2 (the tag this node ran before the move),
+    # multi-arch index digest
+    image: tailscale/tailscale:v1.102.2@sha256:321ce041508c19079b57a28b6666c8d81ab0b08accc0a2585b3ab663d557ac24
     container_name: ts-bellwether
+    # docker-init as PID 1: containerboot waits only on tailscaled, so orphans
+    # an exec leaves behind would stay zombies.
     init: true
     restart: unless-stopped
-    dns: [1.1.1.1]
-    security_opt: [no-new-privileges:true]
     environment:
       TS_HOSTNAME: bellwether
       TS_USERSPACE: "true"
       TS_AUTH_ONCE: "true"
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/serve.json
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTHKEY: ${TS_AUTHKEY:-}      # consumed on the first join only; state/tailscale is the identity
+    # Public resolvers, NOT 100.100.100.100: quad-100 SERVFAILs public names
+    # here and ACME renewal would die silently (STUDY-GUIDE case study #4).
+    dns: [1.1.1.1, 1.0.0.1]
     volumes:
       - ./state/tailscale:/var/lib/tailscale
       - ./serve.json:/config/serve.json:ro
     networks:
       door:
-        ipv4_address: 10.253.0.2
+        ipv4_address: 10.253.89.2
       egress: {}
+    # Userspace tailscale needs no NET_ADMIN or NET_RAW; without NET_RAW this
+    # peer cannot spoof the proxy's address on the door network. Every default
+    # capability is dropped except DAC_OVERRIDE: root here must still open
+    # ./state/tailscale, which the host's stack tool keeps cole-owned at 0700
+    # (cap_add is refused by the validator, V-03, so the set is spelled out).
+    cap_drop:
+      - AUDIT_WRITE
+      - CHOWN
+      - FOWNER
+      - FSETID
+      - KILL
+      - MKNOD
+      - NET_BIND_SERVICE
+      - NET_RAW
+      - SETFCAP
+      - SETGID
+      - SETPCAP
+      - SETUID
+      - SYS_CHROOT
+    security_opt: [no-new-privileges:true]
 
   oauth2-proxy:
-    # TODO: pin the digest: docker buildx imagetools inspect quay.io/oauth2-proxy/oauth2-proxy:<tag>
-    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # quay.io/oauth2-proxy/oauth2-proxy:v7.15.3 (the tag the door ran before
+    # the move), multi-arch index digest
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3@sha256:10a1165743a192e1940b4708fb9647027185ce11a681a1c5519b442ff7f1f561
     container_name: bellwether-oauth2-proxy
-    init: true
     restart: unless-stopped
-    depends_on: [ts-bellwether, bellwether]
-    user: "65532:65532"  # the image's nonroot user
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    # X-Forwarded-* count only from the sidecar, its one peer on the door network.
-    command: ["--trusted-proxy-ip=10.253.0.2/32"]
+    user: "65532:65532"  # the image's own nonroot user, spelled out
+    depends_on: [ts-bellwether]
+    # Flag, not env: --trusted-proxy-ip has no env mapping. The exact peer is
+    # the sidecar on the door network.
+    command: ["--trusted-proxy-ip=10.253.89.2/32"]
     environment:
       OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: "Pocket ID"
       OAUTH2_PROXY_OIDC_ISSUER_URL: https://id.colobus-stargazer.ts.net
-      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      # The bellwether Pocket ID client (confidential, PKCE). Its id is also the
+      # audience the server requires in every id token (PORTAL_OIDC_AUDIENCE).
       OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID}
       OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
-      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
       OAUTH2_PROXY_REDIRECT_URL: https://bellwether.colobus-stargazer.ts.net/oauth2/callback
-      OAUTH2_PROXY_HTTP_ADDRESS: 10.253.0.3:4180
-      OAUTH2_PROXY_UPSTREAMS: http://10.253.0.11:8080
-      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"   # who may hold an account = the client's allowed groups in Pocket ID
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_COOKIE_EXPIRE: 12h
+      # The 12h cookie must not outlive the id token it forwards (AUTH.md):
+      # offline_access and a 30m refresh keep the forwarded token fresh.
+      OAUTH2_PROXY_SCOPE: "openid email profile offline_access"
+      OAUTH2_PROXY_COOKIE_REFRESH: 30m
+      OAUTH2_PROXY_HTTP_ADDRESS: 10.253.89.3:4180
       OAUTH2_PROXY_REVERSE_PROXY: "true"
-      # The deploy's witness is stack.toml's health path through the door: let
-      # it through without a session, and strip caller-supplied identity headers.
+      OAUTH2_PROXY_UPSTREAMS: http://10.253.89.11:3000
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      # Deploy witness and monitoring: tenant-less liveness without a session
+      # (the deploy rolls back on a 302 here).
       OAUTH2_PROXY_SKIP_AUTH_ROUTES: "GET=^/healthz$$"
+      # Forward the ID TOKEN so the app checks a signature; without it the
+      # portal answers 401 to everything.
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
+      # And no identity headers: nothing downstream reads them. Strip any a
+      # caller supplies, on the skipped /healthz route too.
+      OAUTH2_PROXY_PASS_USER_HEADERS: "false"
+      OAUTH2_PROXY_PASS_BASIC_AUTH: "false"
       OAUTH2_PROXY_SKIP_AUTH_STRIP_HEADERS: "true"
-    dns: [1.1.1.1]
+      # Sign-out's rd= chain to Pocket ID's end-session works only for a
+      # whitelisted host (AUTH.md, sign-out).
+      OAUTH2_PROXY_WHITELIST_DOMAINS: id.colobus-stargazer.ts.net
+    dns: [1.1.1.1, 1.0.0.1]
     extra_hosts:
-      # OIDC discovery and the token exchange go to the id node over the host's
-      # tailnet; the public resolver cannot answer its name.
+      # OIDC discovery, JWKS and token exchange go to the id node over the
+      # host's tailnet; the name is pinned because the public resolver cannot
+      # answer it.
       - "id.colobus-stargazer.ts.net:${ID_TAILNET_IP:?set ID_TAILNET_IP (the id node's tailscale IP) in .env}"
     networks:
       door:
-        ipv4_address: 10.253.0.3
+        ipv4_address: 10.253.89.3
       upstream:
-        ipv4_address: 10.253.0.10
+        ipv4_address: 10.253.89.10
       egress: {}
-
-  bellwether:
-    image: ${BELLWETHER_IMAGE}
-    container_name: bellwether
-    init: true
-    user: "65532:65532"  # not root; the deploy gives each ./state/<sub> it binds to this uid
-    restart: unless-stopped
-    read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # The app listens on 10.253.0.11:8080 (or 0.0.0.0:8080), where only the door
-    # reaches it, and reads the signed-in person from x-forwarded-user. Add
-    # `egress: {}` below if it needs the internet. Add a healthcheck and its
-    # own state:
-    #   volumes: ["./state/data:/data"]
+
+  # --- Postgres 16 ------------------------------------------------------------------
+  # The service keeps its pre-move name `db` (container bellwether-db), and the
+  # server and worker theirs, so the first deploy replaces the running
+  # containers in place (same compose project, same container names).
+  db:
+    # postgres:16-alpine (16.14, the image this database ran before the move),
+    # multi-arch index digest. The major version is the data directory's: a
+    # bump past 16 needs a dump and restore, never just a new tag.
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    container_name: bellwether-db
+    restart: unless-stopped
+    # The image's postgres user, which owns the data directory: the entrypoint
+    # then runs postgres directly and needs no capability.
+    user: "70:70"
+    environment:
+      # Read by initdb only, on an empty data directory (a restore). The
+      # password is the role's; the server and worker present it over the db
+      # network (pg_hba: scram-sha-256 for every host but loopback).
+      POSTGRES_DB: agent_trading_platform
+      POSTGRES_USER: atp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # No db/bootstrap mount: initdb runs it only into an empty data directory,
+    # and a fresh database is restored from the nightly pg_dump instead
+    # (AGENTS.md, Production).
+    volumes:
+      - ./state/db:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql:rw,nosuid,nodev,uid=70,gid=70,mode=2775
+      - /tmp:rw,nosuid,nodev,mode=1777
+    read_only: true
+    networks:
+      db: {}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # A clean shutdown (the image's SIGINT, a fast shutdown) has time to finish.
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atp -d agent_trading_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- bellwether (the pinned image) ---------------------------------------------
+  server:
+    # Built by the host from this repository's Dockerfile at the merged commit
+    # and pinned in the runtime .env by the deploy.
+    image: ${BELLWETHER_IMAGE}
+    container_name: bellwether
+    restart: unless-stopped
+    # Orders `compose up` only; at host boot the restart policy retries the app
+    # into a ready database.
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "1000:1000"  # the image's node user; owns state/secrets (cole)
+    environment:
+      # The upstream address only: the door is the one way in.
+      HOST: 10.253.89.11
+      PORT: "3000"
+      HEALTHCHECK_URL: http://10.253.89.11:3000/healthz
+      PUBLIC_BASE_URL: https://bellwether.colobus-stargazer.ts.net
+      DATABASE_URL: "postgres://atp:${POSTGRES_PASSWORD}@db:5432/agent_trading_platform"
+      ALPACA_PAPER_CREDENTIAL_FILE: /run/secrets/alpaca-paper.env
+      # The Strategy/Analyst chat agent runs in the server request path, so the
+      # server needs the OpenAI OAuth credential too.
+      LLM_OAUTH_CREDENTIAL_FILE: /run/secrets/openai-oauth.json
+      # No login, password or role env (AUTH.md): identity is the id token the
+      # door forwards, checked against Pocket ID's JWKS. Any
+      # PORTAL_ADMIN_*/PORTAL_TRUSTED_PROXY_*/PORTAL_ROLE_* REFUSES the boot.
+      PORTAL_OIDC_ISSUER: https://id.colobus-stargazer.ts.net
+      PORTAL_OIDC_AUDIENCE: ${OIDC_CLIENT_ID}
+    dns: [1.1.1.1, 1.0.0.1]
+    extra_hosts:
+      # The issuer's discovery and JWKS, over the host's tailnet.
+      - "id.colobus-stargazer.ts.net:${ID_TAILNET_IP:?set ID_TAILNET_IP (the id node's tailscale IP) in .env}"
+    volumes:
+      - ./state/secrets/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
+      - ./state/secrets/openai-oauth.json:/run/secrets/openai-oauth.json:ro
     networks:
       upstream:
-        ipv4_address: 10.253.0.11
+        ipv4_address: 10.253.89.11
+      db: {}
+      egress: {}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://10.253.89.11:3000/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 25s
+
+  worker:
+    # The same image: the strategy/risk/execution agent team (no HTTP).
+    image: ${BELLWETHER_IMAGE}
+    container_name: bellwether-worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "1000:1000"
+    environment:
+      DATABASE_URL: "postgres://atp:${POSTGRES_PASSWORD}@db:5432/agent_trading_platform"
+      ALPACA_PAPER_CREDENTIAL_FILE: /run/secrets/alpaca-paper.env
+      LLM_OAUTH_CREDENTIAL_FILE: /run/secrets/openai-oauth.json
+      WORKER_READY_FILE: /tmp/worker-ready
+    dns: [1.1.1.1, 1.0.0.1]
+    volumes:
+      - ./state/secrets/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
+      - ./state/secrets/openai-oauth.json:/run/secrets/openai-oauth.json:ro
+    networks:
+      db: {}
+      egress: {}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/worker-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
