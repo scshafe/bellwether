@@ -31,7 +31,8 @@
 # State (./state, on the host /srv/stacks/bellwether/state):
 #   tailscale  the node identity (the sidecar only)
 #   db         the Postgres 16 data directory, uid 70 (the image's postgres)
-#   secrets    alpaca-paper.env and openai-oauth.json, cole 0600, read-only
+#   secrets    alpaca-paper.env and openai-oauth.json, cole 0700/0600, read-only
+#              (only those two files: the directory is mounted whole)
 name: bellwether
 
 networks:
@@ -243,8 +244,9 @@ services:
       # The issuer's discovery and JWKS, over the host's tailnet.
       - "id.colobus-stargazer.ts.net:${ID_TAILNET_IP:?set ID_TAILNET_IP (the id node's tailscale IP) in .env}"
     volumes:
-      - ./state/secrets/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
-      - ./state/secrets/openai-oauth.json:/run/secrets/openai-oauth.json:ro
+      # The directory, not the two files: the host's stack tool prepares each
+      # bound state/ path as a directory owned by the service's uid.
+      - ./state/secrets:/run/secrets:ro
     networks:
       upstream:
         ipv4_address: 10.253.89.11
@@ -279,8 +281,9 @@ services:
       WORKER_READY_FILE: /tmp/worker-ready
     dns: [1.1.1.1, 1.0.0.1]
     volumes:
-      - ./state/secrets/alpaca-paper.env:/run/secrets/alpaca-paper.env:ro
-      - ./state/secrets/openai-oauth.json:/run/secrets/openai-oauth.json:ro
+      # The directory, not the two files: the host's stack tool prepares each
+      # bound state/ path as a directory owned by the service's uid.
+      - ./state/secrets:/run/secrets:ro
     networks:
       db: {}
       egress: {}
