@@ -28,24 +28,32 @@ scshafe-dev kind: `service` (`dev.toml`).
 
 ## Production
 
-- Lane `autodeploy`, stack `bellwether`, host `lubuntu` (`dev.toml [deploy]`;
-  infra `stacks/bellwether/`). **Merging to `main` deploys**: mc-autodeploy
-  fast-forwards Lubuntu's `~/src/bellwether`, and `tools/stack deploy
-  bellwether` builds the Dockerfile, pins the image, restarts both
-  `bellwether` and `bellwether-worker`, and rolls back if `/healthz` fails.
-- CI never deploys (SERVICE-02). Reached at
-  `https://bellwether.<tailnet>` through oauth2-proxy; `/healthz` stays open.
-- The schema self-migrates on boot (`ensure*Schema`), but a fresh database
-  also needs `db/bootstrap/` (the stack mounts it into initdb).
+- Lane `runner`, layout `app`, host `laptop`, node `bellwether`, door
+  `pocket-id` (`dev.toml [deploy]`). The stack is this repository's
+  `deploy/stack/` (compose, serve.json, stack.toml); infra's
+  `stacks/bellwether/host.conf` holds only the host's allowances. A merge to
+  `main` runs `.github/workflows/deploy.yml`: verify (hosted), then the host
+  entrypoint on the `bellwether-prod` runner builds the Dockerfile, backs up
+  (the identity, `.env`, `state/secrets` and a `pg_dump`), restarts both
+  `bellwether` and `bellwether-worker` onto the new pin, and rolls back if
+  either is unready or `/healthz` fails through the door; then `health`.
+- CI never deploys (SERVICE-02). Reached at `https://bellwether.<tailnet>`
+  through oauth2-proxy; `/healthz` stays open.
+- The database is Postgres 16 in `state/db` on the host (never recreate it; a
+  major-version bump is a dump and restore). The schema self-migrates on boot
+  (`ensure*Schema`), but a fresh, empty database also needs `db/bootstrap/`,
+  which the stack no longer mounts into initdb: restore the nightly `pg_dump`
+  instead, or apply `db/bootstrap/*.sql` in order with `psql` before the
+  server starts.
 
 ## Rules
 
 - PAPER money only: `src/broker.ts` uses the Alpaca paper API; never add a
   real-money path or set `BELLWETHER_FEATURE_BROKER_MODE_LIVE`. Never run the
   smokes or call a broker or LLM API with real credentials outside production.
-- Secrets are files, never in git or output: on Lubuntu the stack's `.env`
-  and `${BELLWETHER_AGENT_RESOURCES}` (`alpaca-paper.env`,
-  `openai-oauth.json`, mounted at `/run/secrets/`). Never print or commit them.
+- Secrets are files, never in git or output: on the laptop the stack's `.env`
+  and `state/secrets/` (`alpaca-paper.env`, `openai-oauth.json`, mounted
+  read-only at `/run/secrets/`). Never print or commit them.
 - No login, password or role env in the app (`AUTH.md`); roles live in
   `portal_users`.
 
