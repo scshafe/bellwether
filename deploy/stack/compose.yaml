@@ -1,0 +1,119 @@
+# Skeleton from scshafe-dev (dev.toml [deploy], DEPLOY-03), with the door:
+# tailnet -> oauth2-proxy (Pocket ID) -> the app. The host's tools/stack
+# validates it against an allowlist before anything runs: no privileges, no
+# host namespaces, binds only under ./state, no published ports but the
+# door's, images either built here (through the pin) or pinned by digest.
+# `dev check` runs the same validator (DEPLOY-04) and lists what it can see
+# (DEPLOY-05).
+#
+# Topology (voice-journey's; the validator requires it with the door, V-11):
+#   door      internal /29   ts-bellwether .2 -> oauth2-proxy .3:4180 (serve.json)
+#   upstream  internal /29   oauth2-proxy .10 -> bellwether .11:8080
+#   egress    bridge         the sidecar (control, DERP, ACME), the door (Pocket ID)
+# Nothing but the sidecar sits on its namespace: under userspace tailscale a
+# tailnet peer reaches every port listening there, so an app there would be
+# reachable around the door. The app trusts the proxy's identity headers, so
+# only the door may reach it.
+# TODO: give the stack its own subnets, 10.253.<n>.0/29 and 10.253.<n>.8/29
+# with n unique on the host (voice-journey has 86), and change every address
+# below with them: the placeholder n = 0 collides with every other skeleton.
+name: bellwether
+
+networks:
+  door:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.253.0.0/29
+  upstream:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.253.0.8/29
+  egress:
+    driver: bridge
+
+services:
+  ts-bellwether:
+    # TODO: pin the digest: docker buildx imagetools inspect tailscale/tailscale:<tag>
+    image: tailscale/tailscale@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: ts-bellwether
+    init: true
+    restart: unless-stopped
+    dns: [1.1.1.1]
+    security_opt: [no-new-privileges:true]
+    environment:
+      TS_HOSTNAME: bellwether
+      TS_USERSPACE: "true"
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+    volumes:
+      - ./state/tailscale:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+    networks:
+      door:
+        ipv4_address: 10.253.0.2
+      egress: {}
+
+  oauth2-proxy:
+    # TODO: pin the digest: docker buildx imagetools inspect quay.io/oauth2-proxy/oauth2-proxy:<tag>
+    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: bellwether-oauth2-proxy
+    init: true
+    restart: unless-stopped
+    depends_on: [ts-bellwether, bellwether]
+    user: "65532:65532"  # the image's nonroot user
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # X-Forwarded-* count only from the sidecar, its one peer on the door network.
+    command: ["--trusted-proxy-ip=10.253.0.2/32"]
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: https://id.colobus-stargazer.ts.net
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_REDIRECT_URL: https://bellwether.colobus-stargazer.ts.net/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 10.253.0.3:4180
+      OAUTH2_PROXY_UPSTREAMS: http://10.253.0.11:8080
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      # The deploy's witness is stack.toml's health path through the door: let
+      # it through without a session, and strip caller-supplied identity headers.
+      OAUTH2_PROXY_SKIP_AUTH_ROUTES: "GET=^/healthz$$"
+      OAUTH2_PROXY_SKIP_AUTH_STRIP_HEADERS: "true"
+    dns: [1.1.1.1]
+    extra_hosts:
+      # OIDC discovery and the token exchange go to the id node over the host's
+      # tailnet; the public resolver cannot answer its name.
+      - "id.colobus-stargazer.ts.net:${ID_TAILNET_IP:?set ID_TAILNET_IP (the id node's tailscale IP) in .env}"
+    networks:
+      door:
+        ipv4_address: 10.253.0.3
+      upstream:
+        ipv4_address: 10.253.0.10
+      egress: {}
+
+  bellwether:
+    image: ${BELLWETHER_IMAGE}
+    container_name: bellwether
+    init: true
+    user: "65532:65532"  # not root; the deploy gives each ./state/<sub> it binds to this uid
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The app listens on 10.253.0.11:8080 (or 0.0.0.0:8080), where only the door
+    # reaches it, and reads the signed-in person from x-forwarded-user. Add
+    # `egress: {}` below if it needs the internet. Add a healthcheck and its
+    # own state:
+    #   volumes: ["./state/data:/data"]
+    networks:
+      upstream:
+        ipv4_address: 10.253.0.11
