@@ -48,8 +48,10 @@ scshafe-dev kind: `service` (`dev.toml`).
   real-money path or set `BELLWETHER_FEATURE_BROKER_MODE_LIVE`. Never run the
   smokes or call a broker or LLM API with real credentials outside production.
 - Secrets are files, never in git or output: on the laptop the stack's `.env`
-  and `state/secrets/` (`alpaca-paper.env`, `openai-oauth.json`, mounted
-  read-only at `/run/secrets/`). Never print or commit them.
+  and `state/secrets/` (`alpaca-paper.env`, `openai-oauth.json`, at
+  `/run/secrets/`). Both are read-only, except that the worker may write
+  `openai-oauth.json` back after an OAuth token refresh. Never print or commit
+  them.
 - No login, password or role env in the app (`AUTH.md`); roles live in
   `portal_users`.
 
