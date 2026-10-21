@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:22.23.4-alpine AS build
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ COPY client ./client
 COPY src ./src
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22.23.4-alpine AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
