@@ -10,7 +10,7 @@ scshafe-dev kind: `service` (`dev.toml`).
 
 ## Run and verify
 
-- Node 22 (Dockerfile `node:22-alpine`; engines `>=22`), npm with
+- Node 22.23.4 (Dockerfile `node:22.23.4-alpine`; engines `>=22.23.4 <23 || >=24.22.1 <25`), npm with
   `package-lock.json`. `.npmrc` sets `bin-links=false`, so scripts call
   `node ./node_modules/...` directly.
 - `npm run build` (server `tsc` to `dist/`, client Vite to `client/dist/`);
